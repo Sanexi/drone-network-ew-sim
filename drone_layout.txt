@@ -1,0 +1,8 @@
+Drone layout:
+
+    Sensors:  S1 S2 S3 S4
+    Relays:     R1   R2   
+    Leader:       M1      
+    Relays:     R3   R4   
+    Attacks:  A1 A2 A3 A4
+
