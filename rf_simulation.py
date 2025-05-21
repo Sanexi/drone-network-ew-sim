@@ -231,20 +231,19 @@ class Swarm2D:
         return snap
     
     def plot_snapshot(self,
-                  *,
-                  pad_frac: float = 0.15,
-                  ax: plt.Axes | None = None) -> None:
+                    *,
+                    pad_frac: float = 0.15,
+                    ax: plt.Axes | None = None) -> None:
         """
         Visual sanity-check of the RF-world swarm geometry.
 
-        *   Coloured arrows from **tx → rx**, annotated with the
-            current Shannon capacity (Mb s⁻¹) stored in `Link2D.capacity_bps`.
-        *   Drone IDs next to every marker.
-        *   Axes automatically scaled so the whole swarm plus `pad_frac`
-            margin fits the view.
+        * Coloured arrows from **tx → rx**, labelled with Shannon capacity.
+        * Drone IDs beside every marker.
+        * Auto-zoom so the whole formation + `pad_frac` margin is visible.
+        * Legend lists every sub-band colour (taken from the link frequencies).
         """
 
-        # --------------------------------------------------------- figure/axes
+        # ------------------------------------------------------- figure / axes
         if ax is None:
             _, ax = plt.subplots(figsize=(10, 8))
 
@@ -254,18 +253,22 @@ class Swarm2D:
 
         xmin, xmax = xs.min(), xs.max()
         ymin, ymax = ys.min(), ys.max()
-        width = xmax - xmin
-        height = ymax - ymin
-        pad = pad_frac * max(width, height)
+        span = max(xmax - xmin, ymax - ymin)
+        pad  = pad_frac * span
 
-        xmin -= pad; xmax += pad
-        ymin -= pad; ymax += pad
+        ax.set_xlim(xmin - pad, xmax + pad)
+        ax.set_ylim(ymin - pad, ymax + pad)
 
-        # ----------------------------------------------------------- draw links
+        # ---------------------------------------------------- colour palette
         palette = plt.colormaps["tab10"]
+
+        # map *unique* link-centre frequencies to colours (stable order)
+        freqs_hz = sorted({lk.freq_hz for lk in self.links})
+        freq2col = {f: palette(i % 10) for i, f in enumerate(freqs_hz)}
+
+        # --------------------------------------------------------- draw links
         for lk in self.links:
-            band_idx = int(round(lk.freq_hz / 1e6)) % 10           # simple hash
-            col = palette(band_idx)
+            col = freq2col[lk.freq_hz]
 
             ax.annotate(
                 "", xy=lk.rx.xy, xytext=lk.tx.xy,
@@ -273,7 +276,6 @@ class Swarm2D:
                 zorder=2,
             )
 
-            # capacity label (Mb/s) at arrow mid-point
             if lk.capacity_bps is not None:
                 mid = (lk.tx.xy + lk.rx.xy) / 2
                 ax.text(mid[0], mid[1],
@@ -282,31 +284,32 @@ class Swarm2D:
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7))
 
         # --------------------------------------------------------- draw drones
-        label_offset = 0.015 * max(width, height)
+        label_offset = 0.015 * span
         for d in self.drones:
             ax.scatter(*d.xy,
                     s=80 if d is self.master else 50,
                     c="white" if d is self.master else "black",
                     edgecolors="k", zorder=3)
-            ax.text(d.xy[0] + label_offset,
-                    d.xy[1] + label_offset,
-                    str(d.id),
-                    fontsize=9, ha="left", va="bottom")
+            ax.text(d.xy[0] + label_offset, d.xy[1] + label_offset,
+                    str(d.id), fontsize=9, ha="left", va="bottom")
 
-        # --------------------------------------------------------- cosmetics
-        ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
-        ax.set_xlabel("x [m]");   ax.set_ylabel("y [m]")
+        # ----------------------------------------------------------- cosmetics
+        ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
         ax.set_title("RF-world swarm snapshot")
         ax.set_aspect("equal", adjustable="box")
 
-        # simple legend placed outside plot
-        link_h = plt.Line2D([0], [0], lw=2.2, color=palette(0),
-                            marker=r'$\rightarrow$', label="Tx→Rx link")
+        # ---------------- legend: one entry per sub-band + drone symbols -----
+        band_handles = [
+            plt.Line2D([0], [0], lw=2.2, color=freq2col[f],
+                    marker=r'$\rightarrow$', label=f"Sub-band {b+1}")
+            for b, f in enumerate(freqs_hz)
+        ]
         mast_h = plt.Line2D([0], [0], marker="o", color="white",
                             markeredgecolor="k", label="Master")
         drn_h  = plt.Line2D([0], [0], marker="o", color="black",
                             markeredgecolor="k", label="Drone")
-        ax.legend(handles=[link_h, mast_h, drn_h],
+
+        ax.legend(handles=band_handles + [mast_h, drn_h],
                 loc="upper left", bbox_to_anchor=(1.02, 1.0))
 
         plt.show()
