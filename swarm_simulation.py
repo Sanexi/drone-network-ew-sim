@@ -32,7 +32,7 @@ class RelayConnectivityConfig(Enum):
 SIM_PARAMS = {
     "network_capacity_type": NetworkCapacity.MEDIUM,
     "LINK_LENGTH_METERS": 250.0,
-    "relay_connectivity_config": RelayConnectivityConfig.MINIMAL, # Enum member
+    "relay_connectivity_config": RelayConnectivityConfig.ALL_CONNECT, # Enum member
     "ew_location": (10000.0, 0.0),
     "ew_power_W": 100.0,
     "BANDWIDTH_MHZ_RANGE": (400, 1200),
@@ -43,7 +43,7 @@ SIM_PARAMS = {
     "max_steps": 1000,
     "logging_enabled": True,
     "csv_output_enabled": True,
-    "csv_filename": "swarm_simulation_log_v3.csv",
+    "csv_filename": "swarm_simulation_log_v4.csv",
 }
 
 # --- Formation Unit Coordinates ---
@@ -156,6 +156,7 @@ class SwarmSimulation:
         self.leader_id = "M1"
         self.current_step = 0
         self.log_data = []
+        self.sim_intended_directed_flows = [] # Will be populated in _init_rf_world_and_swarm
         self.drone_ids_map = {
             "M1": DroneType.LEADER, "R1": DroneType.RELAY, "R2": DroneType.RELAY,
             "R3": DroneType.RELAY, "R4": DroneType.RELAY, "S1": DroneType.SENSOR,
@@ -185,7 +186,7 @@ class SwarmSimulation:
     def _setup_swarm_formation_and_graph(self):
         leader_start_pos = list(self.params["start_point"])
         link_length = self.params["LINK_LENGTH_METERS"]
-        base_network_capacity_value = self.params["network_capacity_type"].value["value"]
+        base_cap_value = self.params["network_capacity_type"].value["value"]
         # Use the enum member directly as the key for EDGE_PROPERTIES_BY_SCENARIO
         current_scenario_props = EDGE_PROPERTIES_BY_SCENARIO[self.params["relay_connectivity_config"]]
 
@@ -206,32 +207,25 @@ class SwarmSimulation:
 
         # Add inter-relay connections based on the connectivity config
         config = self.params["relay_connectivity_config"] # This is the enum member
+        r1, r2, r3, r4 = self.relay_ids_ordered
 
-        # R1 (Front-Left), R2 (Front-Right), R3 (Back-Left), R4 (Back-Right)
         if config == RelayConnectivityConfig.CROSS_ROW or config == RelayConnectivityConfig.ALL_CONNECT:
-            # These edges exist in CROSS_ROW and ALL_CONNECT
-            self.graph.add_edge(self.relay_ids_ordered[0], self.relay_ids_ordered[2]) # R1-R3
-            self.graph.add_edge(self.relay_ids_ordered[1], self.relay_ids_ordered[3]) # R2-R4
-
+            self.graph.add_edge(r1, r3)
+            self.graph.add_edge(r2, r4)
         if config == RelayConnectivityConfig.ALL_CONNECT:
-            # These additional edges only exist in ALL_CONNECT
-            self.graph.add_edge(self.relay_ids_ordered[0], self.relay_ids_ordered[1]) # R1-R2 (Front row)
-            self.graph.add_edge(self.relay_ids_ordered[2], self.relay_ids_ordered[3]) # R3-R4 (Back row)
-            self.graph.add_edge(self.relay_ids_ordered[0], self.relay_ids_ordered[3]) # R1-R4 (Diagonal)
-            self.graph.add_edge(self.relay_ids_ordered[1], self.relay_ids_ordered[2]) # R2-R3 (Diagonal)
-        # For MINIMAL, no additional inter-relay edges are added here.
+            self.graph.add_edge(r1, r2) # R1-R2 (Front row)
+            self.graph.add_edge(r3, r4) # R3-R4 (Back row)
 
         # Initialize edge attributes: bw_area, required_safety_capacity, base_capacity
-        for u, v in self.graph.edges(): # Iterate over edges that NOW correctly exist for the scenario
+        for u, v in self.graph.edges(): # Iterates over unique physical links
             edge_bw_area = get_edge_property_value(u,v,current_scenario_props, "bw_area")
             edge_safety_factor = get_edge_property_value(u,v,current_scenario_props, "safety_factor")
-
-            self.graph.edges[u,v]['bw_area'] = edge_bw_area
-            self.graph.edges[u,v]['required_safety_capacity'] = edge_safety_factor * base_network_capacity_value
-            self.graph.edges[u,v]['base_capacity'] = base_network_capacity_value
-            self.graph.edges[u,v]['current_capacity'] = base_network_capacity_value
-            self.graph.edges[u,v]['is_active'] = True
-            self.graph.edges[u,v]['is_ew_susceptible'] = False
+            self.graph.edges[u,v].update({
+                'bw_area': edge_bw_area,
+                'required_safety_capacity': edge_safety_factor * base_cap_value,
+                'base_capacity': base_cap_value, 'current_capacity': base_cap_value,
+                'is_active': True, 'is_ew_susceptible': False, 'last_ew_effect': 0.0
+            })
 
     def _log_initial_parameters(self):
         if not self.params["logging_enabled"]: return
@@ -290,27 +284,58 @@ class SwarmSimulation:
 
 
         # ---------- RF links for every swarm edge -------------------------
-        tier       = self.params["network_capacity_type"]          # Enum member
-        link_bw_hz = CAPACITY_TO_BW_HZ[tier]                       # Hz
+        # Define intended DIRECTED communication flows for rf.Link2D instantiation
+        intended_directed_flows = []
+        # Sensors -> Relays
+        intended_directed_flows.extend([("S1", "R1"), ("S2", "R1"), ("S3", "R2"), ("S4", "R2")])
+        # Relays -> Master -> Relays
+        intended_directed_flows.extend([("R1", "M1"), ("R2", "M1"), ("M1", "R3"), ("M1", "R4")])
+        # Relays -> Attack
+        intended_directed_flows.extend([("R3", "A1"), ("R3", "A2"), ("R4", "A3"), ("R4", "A4")])
 
-        LINK_POWER_W = 0.1            # 100 mW per intra-swarm radio (example)
-        self.rf_links: dict[tuple, rf.Link2D] = {}
-        for u, v, data in self.graph.edges(data=True):
-            band_idx = data['bw_area'] - 1
+        # Inter-Relay directed flows
+        config = self.params["relay_connectivity_config"]
+        r1, r2, r3, r4 = self.relay_ids_ordered
+        if config == RelayConnectivityConfig.CROSS_ROW or config == RelayConnectivityConfig.ALL_CONNECT:
+            intended_directed_flows.append((r1, r3)) # Front-Left to Back-Left
+            intended_directed_flows.append((r2, r4)) # Front-Right to Back-Right
+        if config == RelayConnectivityConfig.ALL_CONNECT:
+            intended_directed_flows.append((r1, r2)) # Intra-row Front: Left to Right
+            intended_directed_flows.append((r3, r4)) # Intra-row Back: Left to Right
+
+        # Create rf.Link2D objects based on these directed flows
+        self.sim_intended_directed_flows = []
+        all_rf_link_objects = []
+        current_scenario_props = EDGE_PROPERTIES_BY_SCENARIO[self.params["relay_connectivity_config"]]
+        centres, sub_bw_hz = rf.build_subbands() # Assuming this is available
+        link_bw_hz = CAPACITY_TO_BW_HZ[self.params["network_capacity_type"]]
+        LINK_POWER_W = 0.1 # 100 mW per intra-swarm radio (example)
+        band_idx_jammer = self.jam_band_idx - 1
+
+
+        for tx_id, rx_id in intended_directed_flows:
+            if tx_id not in rf_drone_map or rx_id not in rf_drone_map:
+                print(f"Warning: Drone ID {tx_id} or {rx_id} not in rf_drone_map. Skipping Link2D.")
+                continue
+
+            # Properties are for the physical link
+            edge_bw_area = get_edge_property_value(tx_id, rx_id, current_scenario_props, "bw_area")
+            band_idx_edge = edge_bw_area - 1
+
             lk = rf.Link2D(
-                tx  = rf_drone_map[u],
-                rx  = rf_drone_map[v],
-                freq_hz = centres[band_idx],
-                p_tx_w  = LINK_POWER_W,
-                bw_hz   = link_bw_hz,             # already a Hz value
-                is_susceptible = (band_idx == (self.jam_band_idx - 1))
-        )
-            self.rf_links[tuple(sorted((u, v)))] = lk
+                tx=rf_drone_map[tx_id],
+                rx=rf_drone_map[rx_id],
+                freq_hz=centres[band_idx_edge],
+                p_tx_w=LINK_POWER_W,
+                bw_hz=link_bw_hz,
+                is_susceptible=(band_idx_edge == band_idx_jammer)
+            )
+            all_rf_link_objects.append(lk)
+            self.sim_intended_directed_flows.append((tx_id, rx_id)) # Add to list for logging
 
-        # one canonical swarm object
         self.rf_swarm = rf.Swarm2D(rf_master, rf_drones,
-                                    list(self.rf_links.values()),
-                                    scale   = self.params["LINK_LENGTH_METERS"])
+                                    all_rf_link_objects, # Pass the list of directed Link2D objects
+                                    scale=self.params["LINK_LENGTH_METERS"])
 
     def _calculate_distance(self, pos1, pos2):
         return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
@@ -378,12 +403,19 @@ class SwarmSimulation:
                     "connected_drones_count": sum(1 for d in self.drones.values() if d.is_connected_to_leader),
                     "disabled_drones_ids": [id_str for id_str,d in self.drones.items() if not d.is_connected_to_leader],
                     "edges": []}
-        for u,v,data in self.graph.edges(data=True):
-            step_log["edges"].append({"u":u,"v":v,"is_active":data['is_active'],
-                                     "current_capacity":data['current_capacity'],
-                                     "required_safety_capacity":data['required_safety_capacity'],
-                                     "bw_area":data['bw_area'],
-                                     "is_ew_susceptible":data['is_ew_susceptible']})
+        if hasattr(self, 'sim_intended_directed_flows'):
+            for tx_id, rx_id in self.sim_intended_directed_flows:
+                physical_link_key = tuple(sorted((tx_id, rx_id)))
+                if self.graph.has_edge(*physical_link_key):
+                    data = self.graph.edges[physical_link_key]
+                    step_log["edges"].append({
+                        "u": tx_id, "v": rx_id, "is_active": data['is_active'],
+                        "current_capacity": data['current_capacity'],
+                        "required_safety_capacity": data['required_safety_capacity'],
+                        "bw_area": data['bw_area'],
+                        "is_ew_susceptible": data['is_ew_susceptible']
+                        # "ew_effect":data.get('last_ew_effect',0.0) # If available
+                    })
         self.log_data.append(step_log)
 
     def run_simulation(self):
