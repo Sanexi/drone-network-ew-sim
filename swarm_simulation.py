@@ -2,6 +2,8 @@ import networkx as nx
 import math
 import random
 import csv
+import numpy as np
+import rf_simulation as rf
 # import uuid # No longer explicitly used for drone IDs as they are predefined
 from enum import Enum
 
@@ -13,6 +15,12 @@ class NetworkCapacity(Enum):
     MEDIUM = {"name": "medium", "value": 1e6} # 1 Mbps
     LARGE = {"name": "large", "value": 5e6} # 5 Mbps
 
+CAPACITY_TO_BW_HZ = {
+        NetworkCapacity.SMALL : 0.05e6,   #  50 kHz  → “narrow”
+        NetworkCapacity.MEDIUM: 0.5e6,   # 500 kHz  → “medium”
+        NetworkCapacity.LARGE : 2.5e6,   # 300 kHz  → “wide”
+    }
+
 # Relay Connectivity Configuration
 class RelayConnectivityConfig(Enum):
     MINIMAL = 1     # Only M-R and R-S/A links
@@ -23,16 +31,16 @@ class RelayConnectivityConfig(Enum):
 # Simulation Parameters
 SIM_PARAMS = {
     "network_capacity_type": NetworkCapacity.MEDIUM,
-    "LINK_LENGTH_METERS": 25.0,
+    "LINK_LENGTH_METERS": 250.0,
     "relay_connectivity_config": RelayConnectivityConfig.MINIMAL, # Enum member
-    "ew_location": (1050.0, 0.0),
-    "ew_strength_factor": 100000.0,
+    "ew_location": (10000.0, 0.0),
+    "ew_power_W": 100.0,
     "BANDWIDTH_MHZ_RANGE": (400, 1200),
     "EW_JAMMER_BW_AREA_SELECTION": "random",
     "start_point": (0.0, 0.0),
-    "end_point": (1000.0, 0.0),
+    "end_point": (10000.0, 0.0),
     "step_size_m": 10.0,
-    "max_steps": 200,
+    "max_steps": 1000,
     "logging_enabled": True,
     "csv_output_enabled": True,
     "csv_filename": "swarm_simulation_log_v3.csv",
@@ -139,49 +147,6 @@ class Drone:
     def move_to(self, new_pos):
         if self.is_connected_to_leader: self.pos[0] = new_pos[0]; self.pos[1] = new_pos[1]
 
-# --- EWSystem Class ---
-class EWSystem:
-    def __init__(self, ew_jammer_location, ew_jammer_bw_area, ew_strength_factor,
-                 link_length_meters, all_swarm_edges_info):
-        self.jammer_location = ew_jammer_location
-        self.jammer_bw_area = ew_jammer_bw_area
-        self.strength_factor = ew_strength_factor
-        self.link_length_meters = link_length_meters
-        self.swarm_edges_info = all_swarm_edges_info
-        print(f"EW System Initialized: Jammer BW Area {self.jammer_bw_area}, Strength {self.strength_factor}")
-
-    def _calculate_distance(self, pos1, pos2):
-        return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
-
-    def _get_edge_midpoint(self, drone1_pos, drone2_pos):
-        return ((drone1_pos[0] + drone2_pos[0]) / 2, (drone1_pos[1] + drone2_pos[1]) / 2)
-
-    def update_ew_effects_on_edges(self, current_drone_objects):
-        edge_ew_outputs = {}
-        for u_id, v_id, edge_bw_area, edge_base_capacity in self.swarm_edges_info:
-            edge_key = tuple(sorted((u_id, v_id)))
-            if u_id not in current_drone_objects or v_id not in current_drone_objects:
-                edge_ew_outputs[edge_key] = {
-                    'is_susceptible': False, 'raw_ew_effect': 0.0,
-                    'current_max_capacity_after_ew': edge_base_capacity}
-                continue
-            drone1, drone2 = current_drone_objects[u_id], current_drone_objects[v_id]
-            is_susceptible = (edge_bw_area == self.jammer_bw_area)
-            raw_ew_effect, current_max_capacity = 0.0, edge_base_capacity
-            if is_susceptible:
-                edge_actual_length = self._calculate_distance(drone1.pos, drone2.pos)
-                edge_midpoint = self._get_edge_midpoint(drone1.pos, drone2.pos)
-                distance_to_ew = self._calculate_distance(edge_midpoint, self.jammer_location)
-                if distance_to_ew < 1e-6: raw_ew_effect = 1.0
-                else:
-                    edge_length_factor = (edge_actual_length / self.link_length_meters) if self.link_length_meters > 1e-6 else 1.0
-                    raw_ew_effect = min(1.0, max(0.0, (self.strength_factor * edge_length_factor) / (distance_to_ew**2 + 1)))
-                current_max_capacity = max(0.0, edge_base_capacity * (1.0 - raw_ew_effect))
-            edge_ew_outputs[edge_key] = {
-                'is_susceptible': is_susceptible, 'raw_ew_effect': raw_ew_effect,
-                'current_max_capacity_after_ew': current_max_capacity}
-        return edge_ew_outputs
-
 # --- Swarm Simulation Class ---
 class SwarmSimulation:
     def __init__(self, params):
@@ -203,22 +168,19 @@ class SwarmSimulation:
             ("R3", "A1"), ("R3", "A2"), ("R4", "A3"), ("R4", "A4"),]
         self.relay_ids_ordered = ["R1", "R2", "R3", "R4"]
         if self.params["EW_JAMMER_BW_AREA_SELECTION"] == "random":
-            self.ew_jammer_target_bw_area = random.randint(1, 4)
+            self.jam_band_idx = random.randint(1, 4)
         else:
-            self.ew_jammer_target_bw_area = int(self.params["EW_JAMMER_BW_AREA_SELECTION"])
-        print(f"Simulation Jammer Target BW Area: {self.ew_jammer_target_bw_area}")
+            self.jam_band_idx = int(self.params["EW_JAMMER_BW_AREA_SELECTION"])
+        print(f"Simulation Jammer Target BW Area: {self.jam_band_idx}")
         self._setup_swarm_formation_and_graph()
         self._log_initial_parameters()
+
+        self._init_rf_world_and_swarm()
+
         ew_system_edge_list = []
         base_cap_value = self.params["network_capacity_type"].value["value"]
         for u, v, data in self.graph.edges(data=True):
             ew_system_edge_list.append( (u, v, data['bw_area'], base_cap_value) )
-        self.ew_system = EWSystem(
-            ew_jammer_location=self.params["ew_location"],
-            ew_jammer_bw_area=self.ew_jammer_target_bw_area,
-            ew_strength_factor=self.params["ew_strength_factor"],
-            link_length_meters=self.params["LINK_LENGTH_METERS"],
-            all_swarm_edges_info=ew_system_edge_list)
 
     def _setup_swarm_formation_and_graph(self):
         leader_start_pos = list(self.params["start_point"])
@@ -270,7 +232,6 @@ class SwarmSimulation:
             self.graph.edges[u,v]['current_capacity'] = base_network_capacity_value
             self.graph.edges[u,v]['is_active'] = True
             self.graph.edges[u,v]['is_ew_susceptible'] = False
-            self.graph.edges[u,v]['last_ew_effect'] = 0.0
 
     def _log_initial_parameters(self):
         if not self.params["logging_enabled"]: return
@@ -278,8 +239,78 @@ class SwarmSimulation:
         for key, value in self.params.items():
             if isinstance(value, Enum): param_log["data"][key] = value.name # Log enum name
             else: param_log["data"][key] = value
-        param_log["data"]["EW_JAMMER_ACTUAL_BW_AREA"] = self.ew_jammer_target_bw_area
+        param_log["data"]["EW_JAMMER_ACTUAL_BW_AREA"] = self.jam_band_idx
         self.log_data.append(param_log)
+
+    def _init_rf_world_and_swarm(self):
+        # find the bounding box of *all* drones in *relative* metres
+        rel_xy = np.array(
+            [self.drones[d_id].initial_relative_pos_to_leader            # metres
+            for d_id in self.drones]
+        )
+        x_min_rel, y_min_rel = rel_xy.min(axis=0)
+        x_max_rel, y_max_rel = rel_xy.max(axis=0)
+
+        swarm_width  = x_max_rel - x_min_rel       # in metres
+        swarm_height = y_max_rel - y_min_rel
+
+        # leader moves from start-point → end-point (both in params)
+        sx, sy = self.params["start_point"]
+        ex, ey = self.params["end_point"]
+
+        # build the RF world 
+        NX = int(ex - sx + 2*swarm_width)
+        NY = int(ey - sy + 2*swarm_height)                    
+        self.rf_world = rf.World2D((sx - swarm_height, ex + swarm_height), (sy - swarm_width, ey + swarm_width), nx=NX, ny=NY)
+
+        centres, sub_bw_hz = rf.build_subbands()   # all Hz now
+        band_idx   = self.jam_band_idx - 1     
+
+        # convert jammer world-coords → nearest grid index
+        jx, jy  = self.params["ew_location"]
+        ix = int(np.argmin(np.abs(self.rf_world.xs - jx)))
+        iy = int(np.argmin(np.abs(self.rf_world.ys - jy)))
+
+        jammer = rf.Tx2D(self.rf_world, (ix, iy),
+                 freq_hz = centres[band_idx],
+                 p_tx_w  = self.params["ew_power_W"],
+                 bw_hz   = sub_bw_hz,
+                 fspl_thresh_dbm = -200)
+        
+        self.rf_net = rf.Network2D([jammer])
+
+        # ---------- build rf drones with SAME relative pattern -----------
+        rf_drones: list[rf.Drone2D] = []
+        rf_drone_map: dict[str, rf.Drone2D] = {}
+        for d_id, sim_drone in self.drones.items():
+            rel = np.array(sim_drone.initial_relative_pos_to_leader, dtype=float)
+            rf_d = rf.Drone2D(d_id, rel_xy=rel / self.params["LINK_LENGTH_METERS"])
+            rf_drones.append(rf_d); rf_drone_map[d_id] = rf_d
+        rf_master = rf_drone_map[self.leader_id]
+
+
+        # ---------- RF links for every swarm edge -------------------------
+        tier       = self.params["network_capacity_type"]          # Enum member
+        link_bw_hz = CAPACITY_TO_BW_HZ[tier]                       # Hz
+
+        LINK_POWER_W = 0.1            # 100 mW per intra-swarm radio (example)
+        self.rf_links: dict[tuple, rf.Link2D] = {}
+        for u, v, data in self.graph.edges(data=True):
+            band_idx = data['bw_area'] - 1
+            lk = rf.Link2D(
+                tx  = rf_drone_map[u],
+                rx  = rf_drone_map[v],
+                freq_hz = centres[band_idx],
+                p_tx_w  = LINK_POWER_W,
+                bw_hz   = link_bw_hz,             # already a Hz value
+                is_susceptible = (band_idx == (self.jam_band_idx - 1))
+        )
+            self.rf_links[tuple(sorted((u, v)))] = lk
+
+        # one canonical swarm object
+        self.rf_swarm = rf.Swarm2D(rf_master, rf_drones,
+                                    list(self.rf_links.values()),
+                                    scale   = self.params["LINK_LENGTH_METERS"])
 
     def _calculate_distance(self, pos1, pos2):
         return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
@@ -302,7 +333,11 @@ class SwarmSimulation:
                 new_pos_x = leader_drone.pos[0] + drone_obj.initial_relative_pos_to_leader[0]
                 new_pos_y = leader_drone.pos[1] + drone_obj.initial_relative_pos_to_leader[1]
                 drone_obj.move_to((new_pos_x, new_pos_y))
-        ew_outputs_for_edges = self.ew_system.update_ew_effects_on_edges(self.drones)
+
+        ew_outputs_for_edges = self.rf_swarm.update(
+            np.array(self.drones[self.leader_id].pos),
+            self.rf_net)
+
         active_graph_edges = []
         for u, v, edge_data in self.graph.edges(data=True):
             edge_key = tuple(sorted((u,v)))
@@ -311,12 +346,10 @@ class SwarmSimulation:
                 edge_data.update({
                     'is_ew_susceptible': ew_result['is_susceptible'],
                     'current_capacity': ew_result['current_max_capacity_after_ew'],
-                    'last_ew_effect': ew_result['raw_ew_effect'],
                     'is_active': ew_result['current_max_capacity_after_ew'] >= edge_data['required_safety_capacity']})
             else: # Should not happen if ew_system.swarm_edges_info covers all graph edges
                 print(f"Warning: No EW result for edge {edge_key}. Defaulting to active/not susceptible.")
-                edge_data.update({'is_ew_susceptible': False, 'current_capacity': edge_data['base_capacity'],
-                                  'last_ew_effect': 0.0, 'is_active': True})
+                edge_data.update({'is_ew_susceptible': False, 'current_capacity': edge_data['base_capacity'],'is_active': True})
             if edge_data['is_active']: active_graph_edges.append((u,v))
         temp_active_graph = nx.Graph()
         temp_active_graph.add_nodes_from(self.graph.nodes())
@@ -350,8 +383,7 @@ class SwarmSimulation:
                                      "current_capacity":data['current_capacity'],
                                      "required_safety_capacity":data['required_safety_capacity'],
                                      "bw_area":data['bw_area'],
-                                     "is_ew_susceptible":data['is_ew_susceptible'],
-                                     "ew_effect":data.get('last_ew_effect',0.0)})
+                                     "is_ew_susceptible":data['is_ew_susceptible']})
         self.log_data.append(step_log)
 
     def run_simulation(self):
@@ -369,7 +401,7 @@ class SwarmSimulation:
         param_data = next((item["data"] for item in self.log_data if item["type"] == "parameters"),{})
         edge_fieldnames = ['step','leader_pos_x','leader_pos_y','connected_drones_count',
                            'edge_u','edge_v','is_active','current_capacity',
-                           'required_safety_capacity','bw_area','is_ew_susceptible','ew_effect']
+                           'required_safety_capacity','bw_area','is_ew_susceptible']
         with open(filename,'w',newline='') as csvfile:
             writer = csv.writer(csvfile); writer.writerow(["Parameter","Value"])
             for k,v in param_data.items(): writer.writerow([k,v])
@@ -382,7 +414,7 @@ class SwarmSimulation:
                         writer.writerow([log_entry["step"],lp_x,lp_y,log_entry["connected_drones_count"],
                                          edge_info['u'],edge_info['v'],edge_info['is_active'],
                                          edge_info['current_capacity'],edge_info['required_safety_capacity'],
-                                         edge_info['bw_area'],edge_info['is_ew_susceptible'],edge_info['ew_effect']])
+                                         edge_info['bw_area'],edge_info['is_ew_susceptible']])
         print(f"Log written to {filename}")
 
 # --- Main Execution ---
