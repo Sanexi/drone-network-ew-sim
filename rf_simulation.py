@@ -75,80 +75,6 @@ class Tx2D:
         self.power = self.tx_power_dbm - fspl_db(freq_hz, r)      # dBm
         self.cover = self.power >= fspl_thresh_dbm
 
-
-# # ────────────────────────────────────────────────────────────────────
-# # 3.  Network2D : collection of static transmitters + utilities
-# # ────────────────────────────────────────────────────────────────────
-# class Network2D:
-#     def __init__(self, txs: Sequence[Tx2D]):
-#         self.txs = list(txs)
-#         tab10    = colormaps['tab10']
-#         self.tx_colors = [tab10(i % 10) for i, _ in enumerate(txs)]
-
-#     # ...............................................................
-#     # Received power *within a receiver band* at a single point
-#     # ...............................................................
-#     def power_in_band(self, x: float, y: float,
-#                       f_rx: float, bw_hz: float) -> float:
-#         """
-#         Sum received power (dBm) from **all** Tx whose spectra overlap the
-#         Rx band [f_rx ± bw_hz/2] at map point (x,y).
-
-#         Each Tx contribution is scaled by (spectral_overlap / tx.bw_hz),
-#         assuming a uniform power spectral density.
-#         """
-#         p_total_lin = 0.0  # linear mW accumulator
-
-#         for tx in self.txs:
-#             # --- 1. overlap between Rx and this Tx -----------------
-#             fmin_rx, fmax_rx = f_rx - bw_hz/2,  f_rx + bw_hz/2
-#             fmin_tx = tx.freq_mhz*1e6 - tx.bw_hz/2
-#             fmax_tx = tx.freq_mhz*1e6 + tx.bw_hz/2
-
-#             overlap_hz = max(0.0, min(fmax_tx, fmax_rx) - max(fmin_tx, fmin_rx))
-#             if overlap_hz == 0.0:
-#                 continue                               # skip if no spectral overlap
-
-#             frac = overlap_hz / tx.bw_hz               # fraction of Tx power seen
-
-#             # --- 2. bilinear interpolation of Tx power map --------
-#             ix = np.interp(x, tx.w.xs, np.arange(tx.w.nx))
-#             iy = np.interp(y, tx.w.ys, np.arange(tx.w.ny))
-#             ix0, iy0 = int(ix), int(iy)                # cell origin
-
-#             if not (0 <= ix0 < tx.w.nx-1 and 0 <= iy0 < tx.w.ny-1):
-#                 continue                               # outside grid
-
-#             wx, wy = ix - ix0, iy - iy0                # bilinear weights
-#             p_dBm = (
-#                 (1-wx)*(1-wy)*tx.power[ix0    , iy0    ] +
-#                  wx   *(1-wy)*tx.power[ix0+1  , iy0    ] +
-#                 (1-wx)* wy   *tx.power[ix0    , iy0 + 1] +
-#                  wx   * wy   *tx.power[ix0+1  , iy0 + 1]
-#             )
-
-#             # --- 3. accumulate in linear domain -------------------
-#             p_total_lin += frac * 10**(p_dBm / 10)     # convert dBm → mW
-
-#         return -200.0 if p_total_lin == 0 else 10*math.log10(p_total_lin)
-
-#     # ...............................................................
-#     # Power-field plot – 4 percentile contours per Tx
-#     # ...............................................................
-#     def plot_power(self, ax: plt.Axes, *, linewidth: float = 1.8):
-#         """
-#         Draw exactly four contour lines (20-,40-,60-,80-th percentiles)
-#         for each transmitter so that rings are always visible.
-#         """
-#         for tx, col in zip(self.txs, self.tx_colors):
-#             levels = np.quantile(tx.power, [0.2, 0.4, 0.6, 0.8])  # ascending
-#             ax.contour(tx.w.X, tx.w.Y, tx.power,
-#                        levels=levels, colors=[col], linewidths=linewidth)
-#             ax.scatter(tx.x, tx.y, marker="X", s=80,
-#                        color=col, edgecolors="k", zorder=10)
-
-#         ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]"); ax.set_aspect("equal")
-
 # ────────────────────────────────────────────────────────────────────
 # 3.  Network2D – many static Tx
 # ────────────────────────────────────────────────────────────────────
@@ -227,7 +153,8 @@ class Link2D:
                  tx: Drone2D, rx: Drone2D,
                  *, freq_hz: float, p_tx_w: float,
                  bw_hz: float, rx_thresh_dbm: float = -120,
-                 is_susceptible: bool = True):
+                 is_susceptible: bool = True, nf_db: float = 10.0, 
+                 env_noise_db: float = 5.0):
 
         self.tx, self.rx = tx, rx
         self.freq_hz = freq_hz
@@ -236,26 +163,33 @@ class Link2D:
         self.rx_thresh_dbm = rx_thresh_dbm
         self.is_susceptible = is_susceptible
         self.capacity_bps: float | None = None
+        self.nf_db        = nf_db
+        self.env_noise_db = env_noise_db
 
     def update(self, net: Network2D) -> None:
         """
-        Re-compute Shannon capacity **unless** the link is tagged
-        non-susceptible *and* we already cached a value.
-        """
+         Re-compute Shannon capacity **unless** the link is tagged
+         non-susceptible *and* we already cached a value.
+         """
         if (not self.is_susceptible) and (self.capacity_bps is not None):
-            return                                    # nothing changes
+            return
 
-        # signal
+        # ---------- signal -------------------------------------------------
         d = np.hypot(*(self.tx.xy - self.rx.xy))
         p_rx_dbm = self.p_tx_dbm - fspl_db(self.freq_hz, d)
 
-        # noise
-        N_th = -174 + 10*math.log10(self.bw_hz)          # thermal
-        I_ext = self.rx.interference(self.freq_hz, self.bw_hz, net) \
-                if self.is_susceptible else -200.0
-        N_tot = 10*math.log10(10**(N_th/10) + 10**(I_ext/10))
+        # ---------- noise --------------------------------------------------
+        N_therm = -174 + 10*math.log10(self.bw_hz)             # kTB
+        N_sys   = N_therm + self.nf_db + self.env_noise_db     # radio + env.
 
-        snr_lin = 10**((p_rx_dbm - N_tot)/10)
+        I_ext = self.rx.interference(self.freq_hz,
+                                     self.bw_hz, net) if self.is_susceptible else -200.0
+
+        N_tot_lin = 10**(N_sys/10) + 10**(I_ext/10)            # mW
+        N_tot_dbm = 10*math.log10(N_tot_lin)
+
+        # ---------- Shannon capacity --------------------------------------
+        snr_lin = 10**((p_rx_dbm - N_tot_dbm)/10)
         self.capacity_bps = self.bw_hz * math.log2(1 + snr_lin)
 
 
@@ -295,79 +229,85 @@ class Swarm2D:
                 'current_max_capacity_after_ew': lk.capacity_bps,
             }
         return snap
+    
+    def plot_snapshot(self,
+                  *,
+                  pad_frac: float = 0.15,
+                  ax: plt.Axes | None = None) -> None:
+        """
+        Visual sanity-check of the RF-world swarm geometry.
 
+        *   Coloured arrows from **tx → rx**, annotated with the
+            current Shannon capacity (Mb s⁻¹) stored in `Link2D.capacity_bps`.
+        *   Drone IDs next to every marker.
+        *   Axes automatically scaled so the whole swarm plus `pad_frac`
+            margin fits the view.
+        """
 
-# ────────────────────────────────────────────────────────────────────
-# 5.  Demo – one tower + 8-drone swarm
-# ────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    # 1) world --------------------------------------------------------
-    w = World2D((0, 1000), (0, 1000))
+        # --------------------------------------------------------- figure/axes
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 8))
 
-    # 2) static transmitter occupying 1st sub-band -------------------
-    centres, sub_bw_mhz = build_subbands()
-    tx_static = Tx2D(
-        w, (60, 120),
-        freq_mhz = centres[0],
-        p_tx_w   = 10.0,                          # 10 W total RF power
-        bw_hz    = sub_bw_mhz * 1e6,              # full ¼-band (~192 kHz)
-        fspl_thresh_dbm = -200                    # plot everything
-    )
-    net = Network2D([tx_static])
+        # --------------------------------------------------- swarm bounding box
+        xs = np.array([d.xy[0] for d in self.drones])
+        ys = np.array([d.xy[1] for d in self.drones])
 
-    # 3) swarm geometry ----------------------------------------------
-    N_DRONES = 8
-    angles   = np.linspace(0, 2*np.pi, N_DRONES, endpoint=False)
-    master   = Drone2D(0, np.zeros(2))
-    drones   = [master] + [
-        Drone2D(i+1, np.array([np.cos(a), np.sin(a)]))
-        for i, a in enumerate(angles)
-    ]
+        xmin, xmax = xs.min(), xs.max()
+        ymin, ymax = ys.min(), ys.max()
+        width = xmax - xmin
+        height = ymax - ymin
+        pad = pad_frac * max(width, height)
 
-    # 4) links: round-robin sub-band allocation ----------------------
-    link_bw_hz = 0.15e6
-    links = [
-        Link2D(master, d,
-               freq_mhz = centres[(i-1) % 4],
-               p_tx_dbm = 20,
-               bw_hz    = link_bw_hz)
-        for i, d in enumerate(drones[1:], 1)
-    ]
+        xmin -= pad; xmax += pad
+        ymin -= pad; ymax += pad
 
-    swarm = Swarm2D(master, drones, links, scale=20)
-    swarm.move(np.array([600, 300]))
-    swarm.evaluate(net)
+        # ----------------------------------------------------------- draw links
+        palette = plt.colormaps["tab10"]
+        for lk in self.links:
+            band_idx = int(round(lk.freq_hz / 1e6)) % 10           # simple hash
+            col = palette(band_idx)
 
-    # 5) plotting -----------------------------------------------------
-    fig, (ax_map, ax_local) = plt.subplots(1, 2, figsize=(13, 5))
+            ax.annotate(
+                "", xy=lk.rx.xy, xytext=lk.tx.xy,
+                arrowprops=dict(arrowstyle="-|>", lw=2.2, color=col),
+                zorder=2,
+            )
 
-    # full-map: four-ring field-lines
-    net.plot_power(ax_map)
-    ax_map.set_title("Static tower – power field")
-    for d in drones:
-        ax_map.scatter(*d.xy, marker="o",
-                       c="w" if d is master else "k", edgecolors="k")
+            # capacity label (Mb/s) at arrow mid-point
+            if lk.capacity_bps is not None:
+                mid = (lk.tx.xy + lk.rx.xy) / 2
+                ax.text(mid[0], mid[1],
+                        f"{lk.capacity_bps/1e6:.2f} Mb/s",
+                        fontsize=8, ha="center", va="center",
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7))
 
-    # zoomed local view with capacity shading
-    REF_CAP = 5e6
-    palette = colormaps['tab10']
-    for lk in links:
-        colour = palette(centres.index(lk.freq_mhz) % 10)
-        alpha  = np.clip(lk.capacity_bps / REF_CAP, 0, 1)
-        ax_local.plot([lk.tx.xy[0], lk.rx.xy[0]],
-                      [lk.tx.xy[1], lk.rx.xy[1]],
-                      c=(*colour[:3], alpha), lw=3)
-        midpoint = (lk.tx.xy + lk.rx.xy) / 2
-        ax_local.text(midpoint[0], midpoint[1],
-                      f"{lk.capacity_bps/1e6:.2f} Mb/s",
-                      ha="center", va="center", fontsize=8)
+        # --------------------------------------------------------- draw drones
+        label_offset = 0.015 * max(width, height)
+        for d in self.drones:
+            ax.scatter(*d.xy,
+                    s=80 if d is self.master else 50,
+                    c="white" if d is self.master else "black",
+                    edgecolors="k", zorder=3)
+            ax.text(d.xy[0] + label_offset,
+                    d.xy[1] + label_offset,
+                    str(d.id),
+                    fontsize=9, ha="left", va="bottom")
 
-    for d in drones:
-        ax_local.scatter(*d.xy, marker="o",
-                         c="w" if d is master else "k", edgecolors="k")
-    ax_local.set_xlim(master.xy[0]-60, master.xy[0]+60)
-    ax_local.set_ylim(master.xy[1]-60, master.xy[1]+60)
-    ax_local.set_title("Swarm local view (capacity shading)")
-    ax_local.set_aspect("equal")
+        # --------------------------------------------------------- cosmetics
+        ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
+        ax.set_xlabel("x [m]");   ax.set_ylabel("y [m]")
+        ax.set_title("RF-world swarm snapshot")
+        ax.set_aspect("equal", adjustable="box")
 
-    plt.tight_layout(); plt.show()
+        # simple legend placed outside plot
+        link_h = plt.Line2D([0], [0], lw=2.2, color=palette(0),
+                            marker=r'$\rightarrow$', label="Tx→Rx link")
+        mast_h = plt.Line2D([0], [0], marker="o", color="white",
+                            markeredgecolor="k", label="Master")
+        drn_h  = plt.Line2D([0], [0], marker="o", color="black",
+                            markeredgecolor="k", label="Drone")
+        ax.legend(handles=[link_h, mast_h, drn_h],
+                loc="upper left", bbox_to_anchor=(1.02, 1.0))
+
+        plt.show()
+    
