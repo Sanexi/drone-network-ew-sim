@@ -4,8 +4,8 @@ import random
 import csv
 import numpy as np
 import rf_simulation as rf
-# import uuid # No longer explicitly used for drone IDs as they are predefined
 from enum import Enum
+import copy # For deep copying params
 
 # --- Constants and Configuration ---
 
@@ -28,22 +28,22 @@ class RelayConnectivityConfig(Enum):
     ALL_CONNECT = 3 # CROSS_ROW + R1-R2, R3-R4, R1-R4, R2-R3 (full inter-relay mesh)
 
 
-# Simulation Parameters
-SIM_PARAMS = {
+# Default Simulation Parameters (can be overridden by data_collector.py)
+DEFAULT_SIM_PARAMS = {
     "network_capacity_type": NetworkCapacity.MEDIUM,
     "LINK_LENGTH_METERS": 250.0,
-    "relay_connectivity_config": RelayConnectivityConfig.ALL_CONNECT, # Enum member
+    "relay_connectivity_config": RelayConnectivityConfig.MINIMAL,
     "ew_location": (10000.0, 0.0),
     "ew_power_W": 100.0,
     "BANDWIDTH_MHZ_RANGE": (400, 1200),
-    "EW_JAMMER_BW_AREA_SELECTION": "random",
+    "EW_JAMMER_BW_AREA_SELECTION": "random", # 1, 2, 3, 4, or "random"
     "start_point": (0.0, 0.0),
-    "end_point": (10000.0, 0.0),
+    "end_point": (10000.0, 0.0), # Target for leader, sim might end sooner/later
     "step_size_m": 10.0,
-    "max_steps": 1000,
-    "logging_enabled": True,
-    "csv_output_enabled": True,
-    "csv_filename": "swarm_simulation_log_v4.csv",
+    "FLIGHT_MARGIN_PAST_EW_M": 0, # How far the rearmost drone must pass EW_X for sim to end
+    "logging_enabled": True, # For single detailed runs
+    "csv_output_enabled": True, # For single detailed runs
+    "csv_filename_prefix": "swarm_log_detailed_",
 }
 
 # --- Formation Unit Coordinates ---
@@ -58,74 +58,44 @@ UNIT_COORDS_RELATIVE_TO_LEADER = {
 }
 
 # --- Edge Properties by Scenario ---
-# Defines 'bw_area' (1-4) and 'safety_factor' (multiplier for base_capacity) for each edge.
-# Edges are defined as sorted tuples of drone IDs.
 EDGE_PROPERTIES_BY_SCENARIO = {
     RelayConnectivityConfig.MINIMAL: {
-        ("M1", "R1"): {"bw_area": 1, "safety_factor": 1.0},
-        ("M1", "R2"): {"bw_area": 2, "safety_factor": 1.0},
-        ("M1", "R3"): {"bw_area": 4, "safety_factor": 1.0},
-        ("M1", "R4"): {"bw_area": 3, "safety_factor": 1.0},
-        ("R1", "S1"): {"bw_area": 2, "safety_factor": 0.5},
-        ("R1", "S2"): {"bw_area": 3, "safety_factor": 0.5},
-        ("R2", "S3"): {"bw_area": 1, "safety_factor": 0.5},
-        ("R2", "S4"): {"bw_area": 4, "safety_factor": 0.5},
-        ("A1", "R3"): {"bw_area": 2, "safety_factor": 0.5},
-        ("A2", "R3"): {"bw_area": 3, "safety_factor": 0.5},
-        ("A3", "R4"): {"bw_area": 1, "safety_factor": 0.5},
-        ("A4", "R4"): {"bw_area": 4, "safety_factor": 0.5},
+        ("M1", "R1"): {"bw_area": 1, "safety_factor": 1.0}, ("M1", "R2"): {"bw_area": 2, "safety_factor": 1.0},
+        ("M1", "R3"): {"bw_area": 4, "safety_factor": 1.0}, ("M1", "R4"): {"bw_area": 3, "safety_factor": 1.0},
+        ("R1", "S1"): {"bw_area": 2, "safety_factor": 0.5}, ("R1", "S2"): {"bw_area": 3, "safety_factor": 0.5},
+        ("R2", "S3"): {"bw_area": 1, "safety_factor": 0.5}, ("R2", "S4"): {"bw_area": 4, "safety_factor": 0.5},
+        ("A1", "R3"): {"bw_area": 2, "safety_factor": 0.5}, ("A2", "R3"): {"bw_area": 3, "safety_factor": 0.5},
+        ("A3", "R4"): {"bw_area": 1, "safety_factor": 0.5}, ("A4", "R4"): {"bw_area": 4, "safety_factor": 0.5},
     },
     RelayConnectivityConfig.CROSS_ROW: {
-        ("M1", "R1"): {"bw_area": 1, "safety_factor": 1.0},
-        ("M1", "R2"): {"bw_area": 2, "safety_factor": 1.0},
-        ("M1", "R3"): {"bw_area": 4, "safety_factor": 1.0},
-        ("M1", "R4"): {"bw_area": 3, "safety_factor": 1.0},
-        ("R1", "S1"): {"bw_area": 2, "safety_factor": 0.25},
-        ("R1", "S2"): {"bw_area": 3, "safety_factor": 0.25},
-        ("R2", "S3"): {"bw_area": 1, "safety_factor": 0.25},
-        ("R2", "S4"): {"bw_area": 4, "safety_factor": 0.25},
-        ("A1", "R3"): {"bw_area": 2, "safety_factor": 0.25},
-        ("A2", "R3"): {"bw_area": 3, "safety_factor": 0.25},
-        ("A3", "R4"): {"bw_area": 1, "safety_factor": 0.25},
-        ("A4", "R4"): {"bw_area": 4, "safety_factor": 0.25},
-        ("R1", "R3"): {"bw_area": 2, "safety_factor": 0.5}, # Cross-row
-        ("R2", "R4"): {"bw_area": 4, "safety_factor": 0.5}, # Cross-row
+        ("M1", "R1"): {"bw_area": 1, "safety_factor": 1.0}, ("M1", "R2"): {"bw_area": 2, "safety_factor": 1.0},
+        ("M1", "R3"): {"bw_area": 4, "safety_factor": 1.0}, ("M1", "R4"): {"bw_area": 3, "safety_factor": 1.0},
+        ("R1", "S1"): {"bw_area": 2, "safety_factor": 0.25}, ("R1", "S2"): {"bw_area": 3, "safety_factor": 0.25},
+        ("R2", "S3"): {"bw_area": 1, "safety_factor": 0.25}, ("R2", "S4"): {"bw_area": 4, "safety_factor": 0.25},
+        ("A1", "R3"): {"bw_area": 2, "safety_factor": 0.25}, ("A2", "R3"): {"bw_area": 3, "safety_factor": 0.25},
+        ("A3", "R4"): {"bw_area": 1, "safety_factor": 0.25}, ("A4", "R4"): {"bw_area": 4, "safety_factor": 0.25},
+        ("R1", "R3"): {"bw_area": 2, "safety_factor": 0.5}, ("R2", "R4"): {"bw_area": 4, "safety_factor": 0.5},
     },
     RelayConnectivityConfig.ALL_CONNECT: {
-        ("M1", "R1"): {"bw_area": 1, "safety_factor": 1.0},
-        ("M1", "R2"): {"bw_area": 2, "safety_factor": 1.0},
-        ("M1", "R3"): {"bw_area": 4, "safety_factor": 1.0},
-        ("M1", "R4"): {"bw_area": 3, "safety_factor": 1.0},
-        ("R1", "S1"): {"bw_area": 2, "safety_factor": 3.0/8.0},
-        ("R1", "S2"): {"bw_area": 3, "safety_factor": 3.0/8.0},
-        ("R2", "S3"): {"bw_area": 1, "safety_factor": 3.0/8.0},
-        ("R2", "S4"): {"bw_area": 4, "safety_factor": 3.0/8.0},
-        ("A1", "R3"): {"bw_area": 2, "safety_factor": 3.0/8.0},
-        ("A2", "R3"): {"bw_area": 3, "safety_factor": 3.0/8.0},
-        ("A3", "R4"): {"bw_area": 1, "safety_factor": 3.0/8.0},
-        ("A4", "R4"): {"bw_area": 4, "safety_factor": 3.0/8.0},
-        ("R1", "R2"): {"bw_area": 3, "safety_factor": 0.5},
-        ("R3", "R4"): {"bw_area": 1, "safety_factor": 0.5},
-        ("R1", "R3"): {"bw_area": 2, "safety_factor": 0.5},
-        ("R2", "R4"): {"bw_area": 4, "safety_factor": 0.5},
-        ("R1", "R4"): {"bw_area": 2, "safety_factor": 0.5},
-        ("R2", "R3"): {"bw_area": 4, "safety_factor": 0.5},
+        ("M1", "R1"): {"bw_area": 1, "safety_factor": 1.0}, ("M1", "R2"): {"bw_area": 2, "safety_factor": 1.0},
+        ("M1", "R3"): {"bw_area": 4, "safety_factor": 1.0}, ("M1", "R4"): {"bw_area": 3, "safety_factor": 1.0},
+        ("R1", "S1"): {"bw_area": 2, "safety_factor": 3.0/8.0}, ("R1", "S2"): {"bw_area": 3, "safety_factor": 3.0/8.0},
+        ("R2", "S3"): {"bw_area": 1, "safety_factor": 3.0/8.0}, ("R2", "S4"): {"bw_area": 4, "safety_factor": 3.0/8.0},
+        ("A1", "R3"): {"bw_area": 2, "safety_factor": 3.0/8.0}, ("A2", "R3"): {"bw_area": 3, "safety_factor": 3.0/8.0},
+        ("A3", "R4"): {"bw_area": 1, "safety_factor": 3.0/8.0}, ("A4", "R4"): {"bw_area": 4, "safety_factor": 3.0/8.0},
+        ("R1", "R2"): {"bw_area": 3, "safety_factor": 0.5}, ("R3", "R4"): {"bw_area": 1, "safety_factor": 0.5},
+        ("R1", "R3"): {"bw_area": 2, "safety_factor": 0.5}, ("R2", "R4"): {"bw_area": 4, "safety_factor": 0.5},
+        ("R1", "R4"): {"bw_area": 2, "safety_factor": 0.5}, ("R2", "R3"): {"bw_area": 4, "safety_factor": 0.5},
     }
 }
-# Helper to get edge properties, ensuring sorted tuple for key
-def get_edge_property_value(u, v, scenario_props, property_key, default_value=None):
+def get_edge_property_value(u, v, scenario_props, property_key):
     key = tuple(sorted((u, v)))
     if key in scenario_props:
-        return scenario_props[key][property_key]
-    # This block should ideally not be reached if graph construction aligns with scenario_props
-    print(f"Critical Error: Edge {key} was constructed but not found in EDGE_PROPERTIES_BY_SCENARIO for property '{property_key}'. Review graph construction and scenario definitions.")
-    if property_key == "bw_area":
-        # Returning a random value here can mask underlying issues.
-        # It's better to ensure all constructed edges are defined.
-        raise ValueError(f"Undefined bw_area for constructed edge {key}")
-    if property_key == "safety_factor":
-        raise ValueError(f"Undefined safety_factor for constructed edge {key}")
-    return default_value
+        if property_key in scenario_props[key]:
+            return scenario_props[key][property_key]
+        else:
+            raise ValueError(f"Property '{property_key}' not found for edge {key} in scenario definitions.")
+    raise ValueError(f"Edge {key} not found in EDGE_PROPERTIES_BY_SCENARIO. Ensure all constructed edges are defined for the current scenario: {key}")
 
 # Drone Types
 class DroneType(Enum):
@@ -149,66 +119,63 @@ class Drone:
 
 # --- Swarm Simulation Class ---
 class SwarmSimulation:
-    def __init__(self, params):
-        self.params = params
+    def __init__(self, params_override=None):
+        self.params = copy.deepcopy(DEFAULT_SIM_PARAMS) # Start with defaults
+        if params_override:
+            self.params.update(params_override) # Apply overrides
+
         self.graph = nx.Graph()
-        self.drones = {}
-        self.leader_id = "M1"
-        self.current_step = 0
-        self.log_data = []
-        self.sim_intended_directed_flows = [] # Will be populated in _init_rf_world_and_swarm
+        self.drones = {}; self.leader_id = "M1"; self.current_step = 0; self.log_data = []
+        self.sim_intended_directed_flows = []
         self.drone_ids_map = {
-            "M1": DroneType.LEADER, "R1": DroneType.RELAY, "R2": DroneType.RELAY,
-            "R3": DroneType.RELAY, "R4": DroneType.RELAY, "S1": DroneType.SENSOR,
-            "S2": DroneType.SENSOR, "S3": DroneType.SENSOR, "S4": DroneType.SENSOR,
-            "A1": DroneType.ATTACK, "A2": DroneType.ATTACK, "A3": DroneType.ATTACK,
-            "A4": DroneType.ATTACK,}
-        self.fixed_connections = [
+            "M1": DroneType.LEADER, "R1": DroneType.RELAY, "R2": DroneType.RELAY, "R3": DroneType.RELAY, "R4": DroneType.RELAY,
+            "S1": DroneType.SENSOR, "S2": DroneType.SENSOR, "S3": DroneType.SENSOR, "S4": DroneType.SENSOR,
+            "A1": DroneType.ATTACK, "A2": DroneType.ATTACK, "A3": DroneType.ATTACK, "A4": DroneType.ATTACK,}
+        self.base_physical_links = [
             ("M1", "R1"), ("M1", "R2"), ("M1", "R3"), ("M1", "R4"),
             ("R1", "S1"), ("R1", "S2"), ("R2", "S3"), ("R2", "S4"),
             ("R3", "A1"), ("R3", "A2"), ("R4", "A3"), ("R4", "A4"),]
         self.relay_ids_ordered = ["R1", "R2", "R3", "R4"]
+
         if self.params["EW_JAMMER_BW_AREA_SELECTION"] == "random":
             self.jam_band_idx = random.randint(1, 4)
-        else:
-            self.jam_band_idx = int(self.params["EW_JAMMER_BW_AREA_SELECTION"])
-        print(f"Simulation Jammer Target BW Area: {self.jam_band_idx}")
+        else: self.jam_band_idx = int(self.params["EW_JAMMER_BW_AREA_SELECTION"])
+        
+        # Metrics for data_collector
+        self.r1_leader_dist_to_ew_on_first_disconnect = np.nan
+        self.r2_leader_dist_to_ew_on_last_disconnect = np.nan
+        self.all_drones_passed_ew_x = False
+        self.initial_susceptible_physical_links = set()
+        self.disconnected_susceptible_physical_links = set()
+        self._r1_recorded = False
+        self._r2_recorded = False
+
         self._setup_swarm_formation_and_graph()
-        self._log_initial_parameters()
-
-        self._init_rf_world_and_swarm()
-
-        ew_system_edge_list = []
-        base_cap_value = self.params["network_capacity_type"].value["value"]
-        for u, v, data in self.graph.edges(data=True):
-            ew_system_edge_list.append( (u, v, data['bw_area'], base_cap_value) )
+        if self.params["logging_enabled"]:
+            self._log_initial_parameters()
+        self._init_rf_world_and_swarm() # This also populates initial_susceptible_physical_links
 
     def _setup_swarm_formation_and_graph(self):
-        leader_start_pos = list(self.params["start_point"])
-        link_length = self.params["LINK_LENGTH_METERS"]
-        base_cap_value = self.params["network_capacity_type"].value["value"]
-        # Use the enum member directly as the key for EDGE_PROPERTIES_BY_SCENARIO
+        leader_start_pos = list(self.params["start_point"]); link_length = self.params["LINK_LENGTH_METERS"]
+        base_cap_val = self.params["network_capacity_type"].value["value"]
         current_scenario_props = EDGE_PROPERTIES_BY_SCENARIO[self.params["relay_connectivity_config"]]
 
         for drone_id_str, drone_type in self.drone_ids_map.items():
             unit_rel_x, unit_rel_y = UNIT_COORDS_RELATIVE_TO_LEADER[drone_id_str]
-            actual_rel_x = unit_rel_x * link_length
-            actual_rel_y = unit_rel_y * link_length
-            initial_pos_x = leader_start_pos[0] + actual_rel_x
-            initial_pos_y = leader_start_pos[1] + actual_rel_y
+            actual_rel_x, actual_rel_y = unit_rel_x * link_length, unit_rel_y * link_length
+            initial_pos_x, initial_pos_y = leader_start_pos[0] + actual_rel_x, leader_start_pos[1] + actual_rel_y
             drone = Drone(drone_id_str, drone_type, (initial_pos_x, initial_pos_y))
             drone.initial_relative_pos_to_leader = [actual_rel_x, actual_rel_y]
             self.drones[drone_id_str] = drone
             self.graph.add_node(drone_id_str, drone=drone)
 
         # Add fixed connections (M-R, R-S/A)
-        for u, v in self.fixed_connections:
+        for u, v in self.base_physical_links:
             self.graph.add_edge(u,v)
 
         # Add inter-relay connections based on the connectivity config
         config = self.params["relay_connectivity_config"] # This is the enum member
         r1, r2, r3, r4 = self.relay_ids_ordered
-
         if config == RelayConnectivityConfig.CROSS_ROW or config == RelayConnectivityConfig.ALL_CONNECT:
             self.graph.add_edge(r1, r3)
             self.graph.add_edge(r2, r4)
@@ -222,17 +189,14 @@ class SwarmSimulation:
             edge_safety_factor = get_edge_property_value(u,v,current_scenario_props, "safety_factor")
             self.graph.edges[u,v].update({
                 'bw_area': edge_bw_area,
-                'required_safety_capacity': edge_safety_factor * base_cap_value,
-                'base_capacity': base_cap_value, 'current_capacity': base_cap_value,
+                'required_safety_capacity': edge_safety_factor * base_cap_val,
+                'base_capacity': base_cap_val, 'current_capacity': base_cap_val,
                 'is_active': True, 'is_ew_susceptible': False, 'last_ew_effect': 0.0
             })
 
     def _log_initial_parameters(self):
         if not self.params["logging_enabled"]: return
-        param_log = {"type": "parameters", "data": {}}
-        for key, value in self.params.items():
-            if isinstance(value, Enum): param_log["data"][key] = value.name # Log enum name
-            else: param_log["data"][key] = value
+        param_log = {"type": "parameters", "data": {k: (v.name if isinstance(v, Enum) else v) for k, v in self.params.items()}}
         param_log["data"]["EW_JAMMER_ACTUAL_BW_AREA"] = self.jam_band_idx
         self.log_data.append(param_log)
 
@@ -344,56 +308,95 @@ class SwarmSimulation:
         self.current_step += 1
         leader_drone = self.drones[self.leader_id]
         current_pos, target_pos = leader_drone.pos, self.params["end_point"]
-        dist_to_target = self._calculate_distance(current_pos, target_pos)
-        dx, dy = 0.0, 0.0
-        if dist_to_target < self.params["step_size_m"]:
-            if dist_to_target > 1e-6 : dx, dy = target_pos[0] - current_pos[0], target_pos[1] - current_pos[1]
-        elif dist_to_target > 1e-6:
-            dir_x, dir_y = (target_pos[0] - current_pos[0]) / dist_to_target, (target_pos[1] - current_pos[1]) / dist_to_target
-            dx, dy = dir_x * self.params["step_size_m"], dir_y * self.params["step_size_m"]
-        leader_drone.move(dx, dy)
-        for drone_id_str, drone_obj in self.drones.items():
-            if drone_id_str == self.leader_id: continue
-            if drone_obj.is_connected_to_leader:
-                new_pos_x = leader_drone.pos[0] + drone_obj.initial_relative_pos_to_leader[0]
-                new_pos_y = leader_drone.pos[1] + drone_obj.initial_relative_pos_to_leader[1]
-                drone_obj.move_to((new_pos_x, new_pos_y))
+        # Leader continues towards end_point, but simulation might end due to other conditions
+        dist_to_tar = self._calculate_distance(current_pos, target_pos); dx, dy = 0.0, 0.0
+        if dist_to_tar > 1e-6 : # Only move if not yet at the final end_point
+            step_dist = min(self.params["step_size_m"], dist_to_tar) # Don't overshoot
+            dir_x,dir_y = (target_pos[0]-current_pos[0])/dist_to_tar, (target_pos[1]-current_pos[1])/dist_to_tar
+            dx,dy = dir_x*step_dist, dir_y*step_dist
+        leader_drone.move(dx,dy)
 
-        ew_outputs_for_edges = self.rf_swarm.update(
-            np.array(self.drones[self.leader_id].pos),
-            self.rf_net)
+        for d_id, d_obj in self.drones.items():
+            if d_id == self.leader_id: continue
+            if d_obj.is_connected_to_leader:
+                npx = leader_drone.pos[0]+d_obj.initial_relative_pos_to_leader[0]
+                npy = leader_drone.pos[1]+d_obj.initial_relative_pos_to_leader[1]
+                d_obj.move_to((npx,npy))
+        
+        ew_outputs_for_physical_links = self.rf_swarm.update(np.array(leader_drone.pos), self.rf_net)
+        
+        active_graph_edges_undirected = []
+        current_step_disconnected_susceptible_links = set()
 
-        active_graph_edges = []
-        for u, v, edge_data in self.graph.edges(data=True):
-            edge_key = tuple(sorted((u,v)))
-            ew_result = ew_outputs_for_edges.get(edge_key)
+        for u, v, edge_data_undirected in self.graph.edges(data=True):
+            physical_link_key = tuple(sorted((u,v)))
+            ew_result = ew_outputs_for_physical_links.get(physical_link_key)
             if ew_result:
-                edge_data.update({
+                edge_data_undirected.update({
                     'is_ew_susceptible': ew_result['is_susceptible'],
                     'current_capacity': ew_result['current_max_capacity_after_ew'],
-                    'is_active': ew_result['current_max_capacity_after_ew'] >= edge_data['required_safety_capacity']})
-            else: # Should not happen if ew_system.swarm_edges_info covers all graph edges
-                print(f"Warning: No EW result for edge {edge_key}. Defaulting to active/not susceptible.")
-                edge_data.update({'is_ew_susceptible': False, 'current_capacity': edge_data['base_capacity'],'is_active': True})
-            if edge_data['is_active']: active_graph_edges.append((u,v))
+                    'is_active': ew_result['current_max_capacity_after_ew'] >= edge_data_undirected['required_safety_capacity']
+                })
+                if ew_result['is_susceptible'] and not edge_data_undirected['is_active']:
+                    current_step_disconnected_susceptible_links.add(physical_link_key)
+            else:
+                edge_data_undirected.update({'is_ew_susceptible': False, 
+                                           'current_capacity': edge_data_undirected['base_capacity'], 
+                                           'is_active': True})
+            if edge_data_undirected['is_active']: active_graph_edges_undirected.append((u,v))
+        
+        # Update R1/R2 metrics
+        if not self._r1_recorded and any(link for link in current_step_disconnected_susceptible_links if link not in self.disconnected_susceptible_physical_links):
+            self.r1_leader_dist_to_ew_on_first_disconnect = abs(leader_drone.pos[0] - self.params["ew_location"][0])
+            self._r1_recorded = True
+        
+        self.disconnected_susceptible_physical_links.update(current_step_disconnected_susceptible_links)
+
+        if not self._r2_recorded and \
+           len(self.initial_susceptible_physical_links) > 0 and \
+           self.disconnected_susceptible_physical_links.issuperset(self.initial_susceptible_physical_links):
+            self.r2_leader_dist_to_ew_on_last_disconnect = abs(leader_drone.pos[0] - self.params["ew_location"][0])
+            self._r2_recorded = True
+            
         temp_active_graph = nx.Graph()
         temp_active_graph.add_nodes_from(self.graph.nodes())
-        temp_active_graph.add_edges_from(active_graph_edges)
+        temp_active_graph.add_edges_from(active_graph_edges_undirected)
         for drone_obj in self.drones.values(): drone_obj.is_connected_to_leader = False
         if self.leader_id in temp_active_graph:
             try:
-                for node_id in nx.node_connected_component(temp_active_graph, self.leader_id):
+                connected_nodes = nx.node_connected_component(temp_active_graph, self.leader_id)
+                for node_id in connected_nodes:
                     if node_id in self.drones: self.drones[node_id].is_connected_to_leader = True
             except (nx.NetworkXError, KeyError):
-                if self.leader_id in self.drones: self.drones[self.leader_id].is_connected_to_leader = True
+                 if self.leader_id in self.drones: self.drones[self.leader_id].is_connected_to_leader = True
+
         if self.params["logging_enabled"]: self._log_step_data()
-        num_connected = sum(1 for d in self.drones.values() if d.is_connected_to_leader)
-        leader_at_target = self._calculate_distance(leader_drone.pos, self.params["end_point"]) < 1e-3
-        if leader_at_target: print(f"End: Leader reached target at step {self.current_step}."); return True
-        if num_connected == 0 and len(self.drones) > 0: print(f"End: All drones disconnected at step {self.current_step}."); return True
-        if num_connected == 1 and self.drones[self.leader_id].is_connected_to_leader and len(self.drones) > 1:
-            print(f"End: Only leader M1 connected at step {self.current_step}."); return True
-        if self.current_step >= self.params["max_steps"]: print(f"End: Max steps ({self.params['max_steps']}) reached."); return True
+        
+        # Check simulation end conditions
+        num_conn = sum(1 for d in self.drones.values() if d.is_connected_to_leader)
+        
+        # New end condition: all drones passed EW jammer's X-coordinate by a margin
+        ew_x = self.params["ew_location"][0]
+        rearmost_drone_x = min(d.pos[0] for d in self.drones.values()) if self.drones else leader_drone.pos[0]
+        
+        if rearmost_drone_x > (ew_x + self.params["FLIGHT_MARGIN_PAST_EW_M"]):
+            self.all_drones_passed_ew_x = True
+            print(f"End: All drones passed EW jammer X-coordinate at step {self.current_step}.")
+            return True
+            
+        # Original end conditions (can still trigger if they happen before all pass EW)
+        if num_conn == 0 and len(self.drones)>0: print(f"End: All disconnected step {self.current_step}."); return True
+        if num_conn == 1 and self.drones[self.leader_id].is_connected_to_leader and len(self.drones)>1:
+            print(f"End: Only M1 connected step {self.current_step}."); return True
+        
+        # Safety break if simulation runs too long for some reason (e.g. drones stuck before EW)
+        # This is a fallback, ideally the FLIGHT_MARGIN_PAST_EW_M condition is met.
+        # Max steps relative to the expected travel distance.
+        max_expected_steps = (self._calculate_distance(self.params["start_point"], self.params["end_point"]) + self.params["FLIGHT_MARGIN_PAST_EW_M"] + 200) / self.params["step_size_m"]
+        if self.current_step > max_expected_steps * 1.5: # Allow some leeway
+            print(f"End: Exceeded safety max steps ({self.current_step} > {max_expected_steps * 1.5:.0f}).")
+            return True
+
         return False
 
     def _log_step_data(self):
@@ -413,24 +416,50 @@ class SwarmSimulation:
                         "current_capacity": data['current_capacity'],
                         "required_safety_capacity": data['required_safety_capacity'],
                         "bw_area": data['bw_area'],
-                        "is_ew_susceptible": data['is_ew_susceptible']
-                        # "ew_effect":data.get('last_ew_effect',0.0) # If available
-                    })
+                        "is_ew_susceptible": data['is_ew_susceptible']})
         self.log_data.append(step_log)
 
     def run_simulation(self):
-        print(f"Starting simulation...\nLeader: {self.leader_id}, Target: {self.params['end_point']}")
-        print(f"Total Drones: {len(self.drones)}, EW Location: {self.params['ew_location']}")
-        if not self.graph.number_of_edges() > 0: print("No edges in the graph after setup.")
-        for _ in range(self.params["max_steps"]):
-            if self.step(): break
-        print("Simulation finished.")
-        if self.params["logging_enabled"] and self.params["csv_output_enabled"]: self.write_log_to_csv()
+        print(f"Starting simulation for config: LINK_LENGTH_METERS={self.params['LINK_LENGTH_METERS']}, JAMMER_BW_AREA={self.jam_band_idx}, CONNECTIVITY={self.params['relay_connectivity_config'].name}")
+        # print(f"Leader: {self.leader_id}, Target: {self.params['end_point']}")
+        # print(f"Total Drones: {len(self.drones)}, EW Location: {self.params['ew_location']}")
+        if not self.graph.number_of_edges()>0: print("No edges in graph after setup.")
+        
+        while True: # Loop until an end condition is met in step()
+            if self.step():
+                break
+        
+        print(f"Simulation finished at step {self.current_step}.")
+        if self.params["logging_enabled"] and self.params["csv_output_enabled"]:
+            self.write_log_to_csv()
+        
+        return {
+            "r1_leader_dist_to_ew": self.r1_leader_dist_to_ew_on_first_disconnect,
+            "r2_leader_dist_to_ew": self.r2_leader_dist_to_ew_on_last_disconnect,
+            "all_drones_passed_ew_x": self.all_drones_passed_ew_x,
+            "final_step": self.current_step,
+            "num_initial_susceptible_links": len(self.initial_susceptible_physical_links),
+            "num_disconnected_susceptible_links": len(self.disconnected_susceptible_physical_links)
+        }
+
 
     def write_log_to_csv(self):
         if not self.log_data: print("No log data to write."); return
-        filename = self.params["csv_filename"]; print(f"Writing log to {filename}...")
+        
+        # Generate a unique part for the filename if not explicitly set for grid search
+        if self.params.get("run_id_for_filename"):
+            filename = f"{self.params['csv_filename_prefix']}{self.params['run_id_for_filename']}.csv"
+        else: # Default for single runs
+            timestamp = random.randint(1000,9999) # Simple unique part
+            filename = f"{self.params['csv_filename_prefix']}{self.params['relay_connectivity_config'].name}_len{int(self.params['LINK_LENGTH_METERS'])}_jam{self.jam_band_idx}_{timestamp}.csv"
+        
+        print(f"Writing detailed log to {filename}...")
         param_data = next((item["data"] for item in self.log_data if item["type"] == "parameters"),{})
+        # Add R1 and R2 to parameters if they were recorded
+        param_data["R1_Distance"] = self.r1_leader_dist_to_ew_on_first_disconnect
+        param_data["R2_Distance"] = self.r2_leader_dist_to_ew_on_last_disconnect
+        param_data["All_Drones_Passed_EW_X"] = self.all_drones_passed_ew_x
+
         edge_fieldnames = ['step','leader_pos_x','leader_pos_y','connected_drones_count',
                            'edge_u','edge_v','is_active','current_capacity',
                            'required_safety_capacity','bw_area','is_ew_susceptible']
@@ -449,7 +478,23 @@ class SwarmSimulation:
                                          edge_info['bw_area'],edge_info['is_ew_susceptible']])
         print(f"Log written to {filename}")
 
-# --- Main Execution ---
+# --- Main Execution (for testing this file directly) ---
 if __name__ == "__main__":
-    simulation = SwarmSimulation(SIM_PARAMS)
-    simulation.run_simulation()
+    print("Running a single test simulation from swarm_simulation_v7.py...")
+    # Example of overriding some parameters for a direct test run
+    test_params = {
+        "LINK_LENGTH_METERS": 300.0,
+        "relay_connectivity_config": RelayConnectivityConfig.CROSS_ROW,
+        "EW_JAMMER_BW_AREA_SELECTION": 2,
+        "logging_enabled": True,
+        "csv_output_enabled": True
+    }
+    simulation = SwarmSimulation(params_override=test_params)
+    results = simulation.run_simulation()
+    print("\n--- Test Run Results ---")
+    print(f"R1 (First Susceptible Disconnect): {results['r1_leader_dist_to_ew']:.2f} m (or NaN)")
+    print(f"R2 (Last Susceptible Disconnect): {results['r2_leader_dist_to_ew']:.2f} m (or NaN)")
+    print(f"All Drones Passed EW X-coord: {results['all_drones_passed_ew_x']}")
+    print(f"Simulation ended at step: {results['final_step']}")
+    print(f"Initial susceptible links: {results['num_initial_susceptible_links']}")
+    print(f"Disconnected susceptible links: {results['num_disconnected_susceptible_links']}")
