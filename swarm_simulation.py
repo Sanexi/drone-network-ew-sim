@@ -451,5 +451,8 @@ class SwarmSimulation:
 
 # --- Main Execution ---
 if __name__ == "__main__":
+    sim = SwarmSimulation(SIM_PARAMS)
+    sim.step()
+    sim.rf_swarm.plot_snapshot()
     simulation = SwarmSimulation(SIM_PARAMS)
     simulation.run_simulation()
