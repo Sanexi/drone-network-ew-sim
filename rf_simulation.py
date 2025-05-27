@@ -2,6 +2,7 @@ from __future__ import annotations
 import math, numpy as np, matplotlib.pyplot as plt
 from typing import List, Sequence, Tuple
 from matplotlib import colormaps
+from scipy.special import erfc
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -35,6 +36,25 @@ def build_subbands(f_min_hz: float = 433e6,
     centres = (edges[:-1] + edges[1:]) / 2
     return centres.tolist(), (edges[1] - edges[0])
 
+# Modulation-specific parameters defined here to avoid cluttering in the main simulation script
+modulations = {
+    "BPSK": {
+        "bits_per_symbol": 1,
+        "ber_func": lambda eb_n0: 0.5 * erfc(np.sqrt(eb_n0))
+    },
+    "QPSK": {
+        "bits_per_symbol": 2,
+        "ber_func": lambda eb_n0: 0.5 * erfc(np.sqrt(eb_n0))
+    },
+    "16QAM": {
+        "bits_per_symbol": 4,
+        "ber_func": lambda eb_n0: 3/8 * erfc(np.sqrt(4/10 * eb_n0))
+    },
+    "64QAM": {
+        "bits_per_symbol": 6,
+        "ber_func": lambda eb_n0: 7/24 * erfc(np.sqrt(1/7 * eb_n0))
+    }
+}
 
 # ────────────────────────────────────────────────────────────────────
 # 1.  World2D – analysis grid
@@ -154,7 +174,8 @@ class Link2D:
                  *, freq_hz: float, p_tx_w: float,
                  bw_hz: float, rx_thresh_dbm: float = -120,
                  is_susceptible: bool = True, nf_db: float = 10.0, 
-                 env_noise_db: float = 5.0):
+                 env_noise_db: float = 5.0, BER_CUTOFF: float = 1e-6, # We assume no error correction
+                 capacity_requirement: float = 1e6, L: float = 1000):
 
         self.tx, self.rx = tx, rx
         self.freq_hz = freq_hz
@@ -163,8 +184,14 @@ class Link2D:
         self.rx_thresh_dbm = rx_thresh_dbm
         self.is_susceptible = is_susceptible
         self.capacity_bps: float | None = None
+        self.throughput_dict: dict[str, float] = {}
         self.nf_db        = nf_db
         self.env_noise_db = env_noise_db
+        self.BER_CUTOFF = BER_CUTOFF
+        self.capacity_requirement: float = capacity_requirement
+        self.is_active: dict[str, bool] = {}
+        self.L = L
+        
 
     def update(self, net: Network2D) -> None:
         """
@@ -178,19 +205,42 @@ class Link2D:
         d = np.hypot(*(self.tx.xy - self.rx.xy))
         p_rx_dbm = self.p_tx_dbm - fspl_db(self.freq_hz, d)
 
-        # ---------- noise --------------------------------------------------
-        N_therm = -174 + 10*math.log10(self.bw_hz)             # kTB
+        # ---------- noise -------------------------------------------------- TODO: Find sources for noisefloor and environmental noise
+        N_therm = 10*math.log10(1.380649e-23 * 290* self.bw_hz) + 30  # kTB
         N_sys   = N_therm + self.nf_db + self.env_noise_db     # radio + env.
 
         I_ext = self.rx.interference(self.freq_hz,
                                      self.bw_hz, net) if self.is_susceptible else -200.0
 
         N_tot_lin = 10**(N_sys/10) + 10**(I_ext/10)            # mW
-        N_tot_dbm = 10*math.log10(N_tot_lin)
+        N_tot_dbm = 10*math.log10(N_tot_lin)                   # dbm
 
         # ---------- Shannon capacity --------------------------------------
         snr_lin = 10**((p_rx_dbm - N_tot_dbm)/10)
         self.capacity_bps = self.bw_hz * math.log2(1 + snr_lin)
+
+        # ---------- Modulation-specific throughputs -----------------------
+        self.throughput_dict.clear()  # Clear any previous values
+
+        for name, mod in modulations.items():
+            bits_per_symbol = mod['bits_per_symbol']
+            R_b = self.bw_hz * bits_per_symbol  # Nyquist rate: B~Rb*bits_per_symbol
+            eb_n0 = snr_lin / bits_per_symbol
+            ber = mod['ber_func'](eb_n0)
+            per = 1 - (1 - ber)**self.L
+            throughput = R_b * (1 - per)
+            # throughput = R_b * (1 - ber) if ber <= self.BER_CUTOFF else 0.0
+
+            self.throughput_dict[name] = throughput
+        
+        # Add shannon capacity to throughput dict for completeness
+        self.throughput_dict["THEORETICAL"] = self.capacity_bps
+
+        # ---------- Check if disconnected (for each modulation) -----------------------
+        for mod_name, throughput in self.throughput_dict.items():
+            self.is_active[mod_name] = (
+                throughput >= self.capacity_requirement
+            )
 
 
 class Swarm2D:
@@ -226,7 +276,8 @@ class Swarm2D:
             key = tuple(sorted((lk.tx.id, lk.rx.id)))
             snap[key] = {
                 'is_susceptible': lk.is_susceptible,
-                'current_max_capacity_after_ew': lk.capacity_bps,
+                'throughput_dict': lk.throughput_dict,
+                'is_active': lk.is_active
             }
         return snap
     
