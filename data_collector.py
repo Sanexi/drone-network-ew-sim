@@ -9,6 +9,11 @@ from enum import Enum
 # Import Enums from the simulation module to be used in param_grid
 from swarm_simulation import NetworkCapacity, RelayConnectivityConfig
 
+# List of the avalable modulation types as defined in RF_simulation
+modulation_types = [
+    "THEORETICAL", "BPSK", "QPSK", "16QAM", "64QAM"
+]
+
 def run_single_simulation(params_override=None, detailed_log_filename_id="single_run"):
     """
     Runs a single simulation with optional parameter overrides and detailed logging.
@@ -28,8 +33,8 @@ def run_single_simulation(params_override=None, detailed_log_filename_id="single
     results = simulation_instance.run_simulation()
 
     print(f"\n--- Results for Single Run (ID: {detailed_log_filename_id}) ---")
-    print(f"  R1 (First Susceptible Disconnect at Leader-EW X-Dist): {results.get('r1_leader_dist_to_ew', np.nan):.2f} m")
-    print(f"  R2 (Last Susceptible Disconnect at Leader-EW X-Dist): {results.get('r2_leader_dist_to_ew', np.nan):.2f} m")
+    print(f"  R1 (First Susceptible Disconnect at Leader-EW X-Dist): {results.get('r1_leader_dist_to_ew', np.nan)["THEORETICAL"]:.2f} m")
+    print(f"  R2 (Last Susceptible Disconnect at Leader-EW X-Dist): {results.get('r2_leader_dist_to_ew', np.nan)["THEORETICAL"]:.2f} m")
     print(f"  All Drones Passed EW X-coord: {results.get('all_drones_passed_ew_x', False)}")
     print(f"  Simulation ended at step: {results.get('final_step', 0)}")
     print(f"  Initial susceptible links: {results.get('num_initial_susceptible_links',0)}")
@@ -65,13 +70,16 @@ def run_grid_search(param_grid, grid_log_filename="grid_search_summary.csv"):
         "logging_enabled", 
         "csv_output_enabled",
         "EW_JAMMER_ACTUAL_BW_AREA",
-        "R1_leader_dist_to_ew", 
-        "R2_leader_dist_to_ew",
         "all_drones_passed_ew_x", 
         "final_step",
         "num_initial_susceptible_links", 
         "num_disconnected_susceptible_links"
     ]
+
+    # Add per-modulation R1 and R2 fields
+    for mod in modulation_types:
+        additional_and_result_fields.append(f"r1_{mod.lower()}_m")
+        additional_and_result_fields.append(f"r2_{mod.lower()}_m")
 
     for field in additional_and_result_fields:
         if field not in fieldnames_set: # Avoid duplicates if already in param_names
@@ -120,8 +128,14 @@ def run_grid_search(param_grid, grid_log_filename="grid_search_summary.csv"):
                                 
                 # Add results to the log_row
                 log_row["EW_JAMMER_ACTUAL_BW_AREA"] = simulation_instance.jam_band_idx
-                log_row["R1_leader_dist_to_ew"] = results.get('r1_leader_dist_to_ew', np.nan)
-                log_row["R2_leader_dist_to_ew"] = results.get('r2_leader_dist_to_ew', np.nan)
+                # log_row["R1_leader_dist_to_ew"] = results.get('r1_leader_dist_to_ew', np.nan)
+                # log_row["R2_leader_dist_to_ew"] = results.get('r2_leader_dist_to_ew', np.nan)
+                r1_results = results.get('r1_leader_dist_to_ew', {})
+                r2_results = results.get('r2_leader_dist_to_ew', {})
+                for mod in modulation_types:
+                    log_row[f"r1_{mod.lower()}_m"] = r1_results.get(mod, np.nan)
+                    log_row[f"r2_{mod.lower()}_m"] = r2_results.get(mod, np.nan)
+
                 log_row["all_drones_passed_ew_x"] = results.get('all_drones_passed_ew_x', False)
                 log_row["final_step"] = results.get('final_step', 0)
                 log_row["num_initial_susceptible_links"] = results.get('num_initial_susceptible_links',0)
@@ -143,8 +157,9 @@ def run_grid_search(param_grid, grid_log_filename="grid_search_summary.csv"):
                     if isinstance(val, Enum): error_row_data[key] = val.name
                 
                 error_row_data["EW_JAMMER_ACTUAL_BW_AREA"] = "ERROR"
-                error_row_data["R1_leader_dist_to_ew"] = "ERROR"
-                error_row_data["R2_leader_dist_to_ew"] = "ERROR"
+                for mod in modulation_types:
+                    error_row_data[f"r1_{mod.lower()}_m"] = "ERROR"
+                    error_row_data[f"r2_{mod.lower()}_m"] = "ERROR"
                 error_row_data["all_drones_passed_ew_x"] = "ERROR"
                 error_row_data["final_step"] = "ERROR"
                 error_row_data["num_initial_susceptible_links"] = "ERROR"

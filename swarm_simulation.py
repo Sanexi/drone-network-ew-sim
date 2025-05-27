@@ -21,6 +21,11 @@ CAPACITY_TO_BW_HZ = {
         NetworkCapacity.LARGE : 2.5e6,   # 300 kHz  → “wide”
     }
 
+# List of the avalable modulation types as defined in RF_simulation
+modulation_types = [
+    "THEORETICAL", "BPSK", "QPSK", "16QAM", "64QAM"
+]
+
 # Relay Connectivity Configuration
 class RelayConnectivityConfig(Enum):
     MINIMAL = 1     # Only M-R and R-S/A links
@@ -142,13 +147,13 @@ class SwarmSimulation:
         else: self.jam_band_idx = int(self.params["EW_JAMMER_BW_AREA_SELECTION"])
         
         # Metrics for data_collector
-        self.r1_leader_dist_to_ew_on_first_disconnect = np.nan
-        self.r2_leader_dist_to_ew_on_last_disconnect = np.nan
+        self.r1_leader_dist_to_ew_on_first_disconnect = {name: np.nan for name in modulation_types}
+        self.r2_leader_dist_to_ew_on_last_disconnect = {name: np.nan for name in modulation_types}
         self.all_drones_passed_ew_x = False
         self.initial_susceptible_physical_links = set()
-        self.disconnected_susceptible_physical_links = set()
-        self._r1_recorded = False
-        self._r2_recorded = False
+        self.disconnected_susceptible_physical_links = {name: set() for name in modulation_types}
+        self._r1_recorded = {name: False for name in modulation_types}
+        self._r2_recorded = {name: False for name in modulation_types}
 
         self._setup_swarm_formation_and_graph()
         if self.params["logging_enabled"]:
@@ -190,8 +195,8 @@ class SwarmSimulation:
             self.graph.edges[u,v].update({
                 'bw_area': edge_bw_area,
                 'required_safety_capacity': edge_safety_factor * base_cap_val,
-                'base_capacity': base_cap_val, 'current_capacity': base_cap_val,
-                'is_active': True, 'is_ew_susceptible': False, 'last_ew_effect': 0.0
+                'base_capacity': base_cap_val, 'current_capacities': {name: base_cap_val for name in modulation_types},
+                'is_active': {name: True for name in modulation_types}, 'is_ew_susceptible': False
             })
 
     def _log_initial_parameters(self):
@@ -318,45 +323,65 @@ class SwarmSimulation:
 
         for d_id, d_obj in self.drones.items():
             if d_id == self.leader_id: continue
-            if d_obj.is_connected_to_leader:
-                npx = leader_drone.pos[0]+d_obj.initial_relative_pos_to_leader[0]
-                npy = leader_drone.pos[1]+d_obj.initial_relative_pos_to_leader[1]
-                d_obj.move_to((npx,npy))
+            npx = leader_drone.pos[0]+d_obj.initial_relative_pos_to_leader[0]
+            npy = leader_drone.pos[1]+d_obj.initial_relative_pos_to_leader[1]
+            d_obj.move_to((npx,npy))
         
         ew_outputs_for_physical_links = self.rf_swarm.update(np.array(leader_drone.pos), self.rf_net)
         
         active_graph_edges_undirected = []
-        current_step_disconnected_susceptible_links = set()
+        current_step_disconnected_susceptible_links = {name: set() for name in modulation_types}
 
         for u, v, edge_data_undirected in self.graph.edges(data=True):
-            physical_link_key = tuple(sorted((u,v)))
+            physical_link_key = tuple(sorted((u, v)))
             ew_result = ew_outputs_for_physical_links.get(physical_link_key)
+
             if ew_result:
                 edge_data_undirected.update({
                     'is_ew_susceptible': ew_result['is_susceptible'],
-                    'current_capacity': ew_result['current_max_capacity_after_ew'],
-                    'is_active': ew_result['current_max_capacity_after_ew'] >= edge_data_undirected['required_safety_capacity']
+                    'current_capacities': ew_result['throughput_dict'],
+                    'is_active': ew_result['is_active'],  # dict[str, bool]
                 })
-                if ew_result['is_susceptible'] and not edge_data_undirected['is_active']:
-                    current_step_disconnected_susceptible_links.add(physical_link_key)
-            else:
-                edge_data_undirected.update({'is_ew_susceptible': False, 
-                                           'current_capacity': edge_data_undirected['base_capacity'], 
-                                           'is_active': True})
-            if edge_data_undirected['is_active']: active_graph_edges_undirected.append((u,v))
-        
-        # Update R1/R2 metrics
-        if not self._r1_recorded and any(link for link in current_step_disconnected_susceptible_links if link not in self.disconnected_susceptible_physical_links):
-            self.r1_leader_dist_to_ew_on_first_disconnect = abs(leader_drone.pos[0] - self.params["ew_location"][0])
-            self._r1_recorded = True
-        
-        self.disconnected_susceptible_physical_links.update(current_step_disconnected_susceptible_links)
 
-        if not self._r2_recorded and \
-           len(self.initial_susceptible_physical_links) > 0 and \
-           self.disconnected_susceptible_physical_links.issuperset(self.initial_susceptible_physical_links):
-            self.r2_leader_dist_to_ew_on_last_disconnect = abs(leader_drone.pos[0] - self.params["ew_location"][0])
-            self._r2_recorded = True
+                if ew_result['is_susceptible']:
+                    for mod_name in modulation_types:
+                        if not ew_result['is_active'].get(mod_name, True):
+                            current_step_disconnected_susceptible_links[mod_name].add(physical_link_key)
+
+            else:
+                edge_data_undirected.update({
+                    'is_ew_susceptible': False,
+                    'current_capacities': {name: edge_data_undirected['base_capacity'] for name in modulation_types},
+                    'is_active': {name: True for name in modulation_types},
+                })
+
+            # Consider a link active for inclusion if *any* modulation is active (or define your own rule)
+            if edge_data_undirected['is_active'].get("THEORETICAL"):
+                active_graph_edges_undirected.append((u, v))
+
+        for mod_name in modulation_types:
+            # R1: First time any link is disconnected
+            if not self._r1_recorded[mod_name] and any(
+                link not in self.disconnected_susceptible_physical_links[mod_name]
+                for link in current_step_disconnected_susceptible_links[mod_name]
+            ):
+                self.r1_leader_dist_to_ew_on_first_disconnect[mod_name] = abs(
+                    leader_drone.pos[0] - self.params["ew_location"][0]
+                )
+                self._r1_recorded[mod_name] = True
+
+            # R2: All links disconnected for this modulation
+            if (
+                not self._r2_recorded[mod_name]
+                and len(self.initial_susceptible_physical_links) > 0
+                and self.disconnected_susceptible_physical_links[mod_name].issuperset(
+                    self.initial_susceptible_physical_links
+                )
+            ):
+                self.r2_leader_dist_to_ew_on_last_disconnect[mod_name] = abs(
+                    leader_drone.pos[0] - self.params["ew_location"][0]
+                )
+                self._r2_recorded[mod_name] = True
             
         temp_active_graph = nx.Graph()
         temp_active_graph.add_nodes_from(self.graph.nodes())
@@ -396,6 +421,11 @@ class SwarmSimulation:
         if self.current_step > max_expected_steps * 1.5: # Allow some leeway
             print(f"End: Exceeded safety max steps ({self.current_step} > {max_expected_steps * 1.5:.0f}).")
             return True
+        
+        if self.current_step % 100 == 0:
+            print(f"\n[Step {self.current_step}] Drone positions:")
+            for d_id, d in self.drones.items():
+                print(f"  {d_id:>2}: x={d.pos[0]:.2f}, y={d.pos[1]:.2f}")
 
         return False
 
@@ -413,7 +443,7 @@ class SwarmSimulation:
                     data = self.graph.edges[physical_link_key]
                     step_log["edges"].append({
                         "u": tx_id, "v": rx_id, "is_active": data['is_active'],
-                        "current_capacity": data['current_capacity'],
+                        "current_capacities": dict(data['current_capacities']),
                         "required_safety_capacity": data['required_safety_capacity'],
                         "bw_area": data['bw_area'],
                         "is_ew_susceptible": data['is_ew_susceptible']})
@@ -439,7 +469,7 @@ class SwarmSimulation:
             "all_drones_passed_ew_x": self.all_drones_passed_ew_x,
             "final_step": self.current_step,
             "num_initial_susceptible_links": len(self.initial_susceptible_physical_links),
-            "num_disconnected_susceptible_links": len(self.disconnected_susceptible_physical_links)
+            "num_disconnected_susceptible_links": len(self.disconnected_susceptible_physical_links["THEORETICAL"])
         }
 
 
@@ -456,13 +486,15 @@ class SwarmSimulation:
         print(f"Writing detailed log to {filename}...")
         param_data = next((item["data"] for item in self.log_data if item["type"] == "parameters"),{})
         # Add R1 and R2 to parameters if they were recorded
-        param_data["R1_Distance"] = self.r1_leader_dist_to_ew_on_first_disconnect
-        param_data["R2_Distance"] = self.r2_leader_dist_to_ew_on_last_disconnect
+        # param_data["R1_Distance"] = self.r1_leader_dist_to_ew_on_first_disconnect
+        # param_data["R2_Distance"] = self.r2_leader_dist_to_ew_on_last_disconnect
         param_data["All_Drones_Passed_EW_X"] = self.all_drones_passed_ew_x
 
         edge_fieldnames = ['step','leader_pos_x','leader_pos_y','connected_drones_count',
-                           'edge_u','edge_v','is_active','current_capacity',
-                           'required_safety_capacity','bw_area','is_ew_susceptible']
+                           'edge_u','edge_v','required_safety_capacity',
+                           'bw_area','is_ew_susceptible']
+        edge_fieldnames.extend([f"{name.lower()}_cap" for name in modulation_types])
+
         with open(filename,'w',newline='') as csvfile:
             writer = csv.writer(csvfile); writer.writerow(["Parameter","Value"])
             for k,v in param_data.items(): writer.writerow([k,v])
@@ -472,10 +504,27 @@ class SwarmSimulation:
                     lp_x = log_entry["leader_pos"][0] if len(log_entry["leader_pos"]) > 0 else 'N/A'
                     lp_y = log_entry["leader_pos"][1] if len(log_entry["leader_pos"]) > 1 else 'N/A'
                     for edge_info in log_entry["edges"]:
-                        writer.writerow([log_entry["step"],lp_x,lp_y,log_entry["connected_drones_count"],
-                                         edge_info['u'],edge_info['v'],edge_info['is_active'],
-                                         edge_info['current_capacity'],edge_info['required_safety_capacity'],
-                                         edge_info['bw_area'],edge_info['is_ew_susceptible']])
+                        # Base values
+                        row = [
+                            log_entry["step"],
+                            lp_x,
+                            lp_y,
+                            log_entry["connected_drones_count"],
+                            edge_info['u'],
+                            edge_info['v'],
+                            edge_info['required_safety_capacity'],
+                            edge_info['bw_area'],
+                            edge_info['is_ew_susceptible']
+                        ]
+
+                        # Modulation-specific capacities
+                        capacities = edge_info.get("current_capacities", {})
+                        row.extend([
+                            capacities.get(mod, 0.0)  # default to 0.0 if missing
+                            for mod in modulation_types
+                        ])
+
+                        writer.writerow(row)
         print(f"Log written to {filename}")
 
 # --- Main Execution (for testing this file directly) ---
@@ -492,9 +541,10 @@ if __name__ == "__main__":
     simulation = SwarmSimulation(params_override=test_params)
     results = simulation.run_simulation()
     print("\n--- Test Run Results ---")
-    print(f"R1 (First Susceptible Disconnect): {results['r1_leader_dist_to_ew']:.2f} m (or NaN)")
-    print(f"R2 (Last Susceptible Disconnect): {results['r2_leader_dist_to_ew']:.2f} m (or NaN)")
+    print(f"R1 (First Susceptible Disconnect): {results['r1_leader_dist_to_ew']['THEORETICAL']:.2f} m (or NaN)")
+    print(f"R2 (Last Susceptible Disconnect): {results['r2_leader_dist_to_ew']['THEORETICAL']:.2f} m (or NaN)")
     print(f"All Drones Passed EW X-coord: {results['all_drones_passed_ew_x']}")
     print(f"Simulation ended at step: {results['final_step']}")
     print(f"Initial susceptible links: {results['num_initial_susceptible_links']}")
     print(f"Disconnected susceptible links: {results['num_disconnected_susceptible_links']}")
+    simulation.rf_swarm.plot_snapshot()
