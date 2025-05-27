@@ -16,9 +16,9 @@ class NetworkCapacity(Enum):
     LARGE = {"name": "large", "value": 5e6} # 5 Mbps
 
 CAPACITY_TO_BW_HZ = {
-        NetworkCapacity.SMALL : 0.05e6,   #  50 kHz  → “narrow”
-        NetworkCapacity.MEDIUM: 0.5e6,   # 500 kHz  → “medium”
-        NetworkCapacity.LARGE : 2.5e6,   # 300 kHz  → “wide”
+        NetworkCapacity.SMALL : 0.2e6,   #  200 kHz  → “narrow”
+        NetworkCapacity.MEDIUM: 1.0e6,   # 1000 kHz  → “medium”
+        NetworkCapacity.LARGE : 20.0e6,   # 20000 kHz  → “wide”
     }
 
 # List of the avalable modulation types as defined in RF_simulation
@@ -290,6 +290,7 @@ class SwarmSimulation:
             # Properties are for the physical link
             edge_bw_area = get_edge_property_value(tx_id, rx_id, current_scenario_props, "bw_area")
             band_idx_edge = edge_bw_area - 1
+            capacity_requirement = self.graph.edges[tx_id, rx_id]['required_safety_capacity']
 
             lk = rf.Link2D(
                 tx=rf_drone_map[tx_id],
@@ -297,10 +298,15 @@ class SwarmSimulation:
                 freq_hz=centres[band_idx_edge],
                 p_tx_w=LINK_POWER_W,
                 bw_hz=link_bw_hz,
-                is_susceptible=(band_idx_edge == band_idx_jammer)
+                is_susceptible=(band_idx_edge == band_idx_jammer),
+                capacity_requirement=capacity_requirement,
             )
             all_rf_link_objects.append(lk)
             self.sim_intended_directed_flows.append((tx_id, rx_id)) # Add to list for logging
+
+            # Add to initial_susceptible_physical_links if susceptible
+            if lk.is_susceptible:
+                self.initial_susceptible_physical_links.add(tuple(sorted((tx_id, rx_id))))
 
         self.rf_swarm = rf.Swarm2D(rf_master, rf_drones,
                                     all_rf_link_objects, # Pass the list of directed Link2D objects
@@ -347,6 +353,7 @@ class SwarmSimulation:
                     for mod_name in modulation_types:
                         if not ew_result['is_active'].get(mod_name, True):
                             current_step_disconnected_susceptible_links[mod_name].add(physical_link_key)
+                            self.disconnected_susceptible_physical_links[mod_name].add(physical_link_key)
 
             else:
                 edge_data_undirected.update({
@@ -361,10 +368,7 @@ class SwarmSimulation:
 
         for mod_name in modulation_types:
             # R1: First time any link is disconnected
-            if not self._r1_recorded[mod_name] and any(
-                link not in self.disconnected_susceptible_physical_links[mod_name]
-                for link in current_step_disconnected_susceptible_links[mod_name]
-            ):
+            if not self._r1_recorded[mod_name] and len(current_step_disconnected_susceptible_links[mod_name]) > 0:
                 self.r1_leader_dist_to_ew_on_first_disconnect[mod_name] = abs(
                     leader_drone.pos[0] - self.params["ew_location"][0]
                 )
@@ -374,8 +378,8 @@ class SwarmSimulation:
             if (
                 not self._r2_recorded[mod_name]
                 and len(self.initial_susceptible_physical_links) > 0
-                and self.disconnected_susceptible_physical_links[mod_name].issuperset(
-                    self.initial_susceptible_physical_links
+                and self.initial_susceptible_physical_links.issubset(
+                    self.disconnected_susceptible_physical_links[mod_name]
                 )
             ):
                 self.r2_leader_dist_to_ew_on_last_disconnect[mod_name] = abs(
@@ -422,10 +426,11 @@ class SwarmSimulation:
             print(f"End: Exceeded safety max steps ({self.current_step} > {max_expected_steps * 1.5:.0f}).")
             return True
         
-        if self.current_step % 100 == 0:
-            print(f"\n[Step {self.current_step}] Drone positions:")
-            for d_id, d in self.drones.items():
-                print(f"  {d_id:>2}: x={d.pos[0]:.2f}, y={d.pos[1]:.2f}")
+        # Debug drone positions
+        # if self.current_step % 100 == 0:
+        #     print(f"\n[Step {self.current_step}] Drone positions:")
+        #     for d_id, d in self.drones.items():
+        #         print(f"  {d_id:>2}: x={d.pos[0]:.2f}, y={d.pos[1]:.2f}")
 
         return False
 

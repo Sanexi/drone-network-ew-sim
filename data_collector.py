@@ -32,9 +32,12 @@ def run_single_simulation(params_override=None, detailed_log_filename_id="single
     simulation_instance = sim.SwarmSimulation(params_override=current_sim_params)
     results = simulation_instance.run_simulation()
 
+    r1_theoretical = results.get('r1_leader_dist_to_ew', {}).get("THEORETICAL", np.nan)
+    r2_theoretical = results.get('r2_leader_dist_to_ew', {}).get("THEORETICAL", np.nan)
+
     print(f"\n--- Results for Single Run (ID: {detailed_log_filename_id}) ---")
-    print(f"  R1 (First Susceptible Disconnect at Leader-EW X-Dist): {results.get('r1_leader_dist_to_ew', np.nan)["THEORETICAL"]:.2f} m")
-    print(f"  R2 (Last Susceptible Disconnect at Leader-EW X-Dist): {results.get('r2_leader_dist_to_ew', np.nan)["THEORETICAL"]:.2f} m")
+    print(f"  R1 (First Susceptible Disconnect at Leader-EW X-Dist): {r1_theoretical:.2f} m")
+    print(f"  R2 (Last Susceptible Disconnect at Leader-EW X-Dist): {r2_theoretical:.2f} m")
     print(f"  All Drones Passed EW X-coord: {results.get('all_drones_passed_ew_x', False)}")
     print(f"  Simulation ended at step: {results.get('final_step', 0)}")
     print(f"  Initial susceptible links: {results.get('num_initial_susceptible_links',0)}")
@@ -190,15 +193,13 @@ if __name__ == "__main__":
     # Define the parameter grid
     # Note: Use Enum members directly, not their names as strings, for type consistency.
     grid_parameters = {
-        "LINK_LENGTH_METERS": [150.0, 250.0, 350.0],
+        "LINK_LENGTH_METERS": [50.0, 150.0, 250.0],
         "relay_connectivity_config": [
             RelayConnectivityConfig.MINIMAL,
             RelayConnectivityConfig.CROSS_ROW,
-            # RelayConnectivityConfig.ALL_CONNECT # Can add more later
+            RelayConnectivityConfig.ALL_CONNECT
         ],
-        "ew_power_W": [50.0, 100.0, 200.0],
-        "EW_JAMMER_BW_AREA_SELECTION": [1, 2, 3, 4] # Test all jammer bands
         # Add other parameters you want to vary, e.g.:
-        # "network_capacity_type": [NetworkCapacity.SMALL, NetworkCapacity.MEDIUM],
+        "network_capacity_type": [NetworkCapacity.SMALL, NetworkCapacity.MEDIUM, NetworkCapacity.LARGE],
     }
     run_grid_search(param_grid=grid_parameters, grid_log_filename="grid_summary_main_test.csv")
