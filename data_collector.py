@@ -195,7 +195,7 @@ if __name__ == "__main__":
     # --- Example: Run a Parallel Grid Search ---
     grid_parameters = {
         "EW_JAMMER_BW_AREA_SELECTION": [1, 2, 3, 4],
-        "LINK_LENGTH_METERS": list(range(10, 301, 10)),
+        "LINK_LENGTH_METERS": list(range(10, 501, 10)),
         "relay_connectivity_config": [
             RelayConnectivityConfig.MINIMAL,
             RelayConnectivityConfig.CROSS_ROW,
@@ -204,4 +204,4 @@ if __name__ == "__main__":
         "network_capacity_type": [NetworkCapacity.SMALL, NetworkCapacity.MEDIUM, NetworkCapacity.LARGE],
     }
     print("\nRunning grid search in parallel mode:")
-    run_grid_search(param_grid=grid_parameters, grid_log_filename="grid_summary_parallel.csv", parallel=True)
+    run_grid_search(param_grid=grid_parameters, grid_log_filename="grid_summary_parallelv2.csv", parallel=True)
