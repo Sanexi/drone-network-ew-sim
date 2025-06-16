@@ -4,7 +4,7 @@ import math
 pixel_reqs = {
     'detection': 2,
     'recognition': 8,
-    'identification': 13,
+    'identification': 12.8,
 }
 
 # More realistic requirements (5x)
@@ -13,16 +13,17 @@ realistic_pixel_reqs = {k: v * 5 for k, v in pixel_reqs.items()}
 # List of cameras with their focal length (mm) and pixel size (µm)
 cameras = [
     {'name': 'DJI Mavic 3 Classic', 'f_mm': 24, 'pixel_size_um': 3.3},
-    {'name': 'Puma AE (Mantis i45)', 'f_mm': 9, 'pixel_size_um': 1.6},  # pixel size approx.
-    {'name': 'Caddx Ratel 2 (analog)', 'f_mm': 2.1, 'pixel_size_um': 5.6},  # approximate
+    {'name': 'DJI Matrice 350 RTK', 'f_mm': 24, 'pixel_size_um': 4.4},
     {'name': 'DJI O4 Air Unit', 'f_mm': 14, 'pixel_size_um': 2.0},
     {'name': 'DJI O4 Air Unit Pro', 'f_mm': 14, 'pixel_size_um': 1.5},
-    {'name': 'Runcam Eagle 2 Pro', 'f_mm': 2.8, 'pixel_size_um': 5.6},
+    {'name': 'Puma AE (Mantis i45)', 'f_mm': 9, 'pixel_size_um': 1.6},  # pixel size approx.
+    {'name': 'Caddx Ratel 2 (analog)', 'f_mm': 2.1, 'pixel_size_um': 5.6},
+    {'name': 'Runcam Eagle 2 Pro (analog)', 'f_mm': 2.8, 'pixel_size_um': 5.6},
 ]
 
 # Target sizes (meters)
 target_sizes = {
-    'human': 2,
+    'human': 1.8,
     'vehicle': 5,
 }
 
