@@ -3,6 +3,7 @@ import itertools
 import os
 import time
 import numpy as np
+import pandas as pd
 import swarm_simulation as sim
 from enum import Enum
 from multiprocessing import Pool, cpu_count
@@ -182,6 +183,133 @@ def run_grid_search(param_grid, grid_log_filename="grid_search_summary.csv", par
     print(f"\n--- {execution_mode} Grid Search Finished ---")
     print(f"Summary results saved to: {full_grid_log_path}")
 
+
+
+# -----------------------------------------------------------
+# 1)  Per-run worker  –  returns one DataFrame
+# -----------------------------------------------------------
+def run_surface_one(args):
+    """
+    args = (topology_enum, jammer_band, cap_req_bits_per_sec)
+
+    For every step this records, per modulation, the *average*
+    normalised-throughput across **all susceptible links** in that
+    jammer band.
+    """
+    topology, band, cap_req = args
+
+    params = sim.DEFAULT_SIM_PARAMS.copy()
+    params.update({
+        "relay_connectivity_config":   topology,
+        "EW_JAMMER_BW_AREA_SELECTION": band,
+        "link_bw_hz":                  cap_req * 4,
+        "capacity_requirement":        cap_req,
+        "logging_enabled":             False,
+        "csv_output_enabled":          False,
+    })
+
+    L_ref = params["LINK_LENGTH_METERS"]
+    sim_inst = sim.SwarmSimulation(params_override=params)
+
+    dist_trace  = []
+    traces_mean = {m: [] for m in modulation_types}   # time-series
+
+    # ------------------------------------------------- run the sim
+    while True:
+        done = sim_inst.step()
+
+        # distance leader ↔ jammer
+        leader_x = sim_inst.drones[sim_inst.leader_id].pos[0]
+        dist = abs(leader_x - params["ew_location"][0])
+        dist_trace.append(dist)
+
+        # accumulate normalised throughput over all susceptible links
+        acc = {m: [] for m in modulation_types}
+        for u, v, e in sim_inst.graph.edges(data=True):
+            if not e["is_ew_susceptible"]:
+                continue
+            L_uv = e["link_length"]
+            scale = (L_uv / L_ref) ** 2
+            for mod in modulation_types:
+                acc[mod].append(e["current_capacities"][mod] * scale)
+
+        # store step-average (mean over susceptible links, NaN if none)
+        for mod in modulation_types:
+            traces_mean[mod].append(
+                np.nan if not acc[mod] else np.mean(acc[mod])
+            )
+
+        if done:
+            break
+
+    # ------------------------------------------------- build DataFrame
+    rows = []
+    for k, dist in enumerate(dist_trace):
+        row = {
+            "topology":   topology.name,
+            "band":       band,
+            "cap_req":    cap_req,
+            "bw_hz":      params["link_bw_hz"],
+            "distance_m": dist,
+        }
+        for mod in modulation_types:
+            row[f"tp_{mod}"] = traces_mean[mod][k]
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# -----------------------------------------------------------
+# 2)  Sweep builder  –  averages the four bands
+# -----------------------------------------------------------
+def build_throughput_surface(parallel: bool = True):
+    """
+    Sweeps
+        • topology ∈ {MINIMAL, CROSS_ROW, ALL_CONNECT}
+        • band     ∈ {1,2,3,4}
+        • cap_req  ∈ 50 points 0.05 → 5 Mb/s
+    Records the *average* normalised-throughput across susceptible
+    links (see run_surface_one), then averages those curves over the
+    four bands and writes results/throughput_surface.csv
+    """
+    cap_reqs = np.linspace(0.05e6, 5e6, 50)
+
+    combos = list(itertools.product(
+        RelayConnectivityConfig,       # 3 topologies
+        [1, 2, 3, 4],                  # 4 jammer bands
+        cap_reqs                       # 50 capacities
+    ))
+
+    if parallel:
+        with Pool(min(cpu_count(), 16)) as pool:
+            dfs = pool.map(run_surface_one, combos)
+    else:
+        dfs = [run_surface_one(c) for c in combos]
+
+    big = pd.concat(dfs, ignore_index=True)
+
+    # long format: one row per modulation
+    long = big.melt(
+        id_vars=["topology", "band", "cap_req", "bw_hz", "distance_m"],
+        value_vars=[f"tp_{m}" for m in modulation_types],
+        var_name="modulation",
+        value_name="throughput_bps"
+    )
+    long["modulation"] = long["modulation"].str.replace("tp_", "", regex=False)
+
+    # average over the four jammer bands
+    surface = (
+        long
+        .groupby(["topology", "modulation", "bw_hz", "distance_m"], as_index=False)
+        .throughput_bps
+        .mean()
+    )
+
+    surface.to_csv("results/throughput_surface.csv", index=False)
+    print("→ Saved averaged-band surface to results/throughput_surface.csv")
+    return surface
+
+
 if __name__ == "__main__":
     # --- Example: Run a Single Detailed Simulation ---
     single_run_params = {
@@ -195,7 +323,7 @@ if __name__ == "__main__":
     # --- Example: Run a Parallel Grid Search ---
     grid_parameters = {
         "EW_JAMMER_BW_AREA_SELECTION": [1, 2, 3, 4],
-        "LINK_LENGTH_METERS": list(range(10, 501, 10)),
+        "LINK_LENGTH_METERS": list(range(10, 501, 20)),
         "relay_connectivity_config": [
             RelayConnectivityConfig.MINIMAL,
             RelayConnectivityConfig.CROSS_ROW,
@@ -204,4 +332,9 @@ if __name__ == "__main__":
         "network_capacity_type": [NetworkCapacity.SMALL, NetworkCapacity.MEDIUM, NetworkCapacity.LARGE],
     }
     print("\nRunning grid search in parallel mode:")
-    run_grid_search(param_grid=grid_parameters, grid_log_filename="grid_summary_parallelv2.csv", parallel=True)
+    # run_grid_search(param_grid=grid_parameters, grid_log_filename="grid_summary_parallelv2.csv", parallel=True)
+
+    # Example usage for collecting throughput surface:
+    print("\nRunning continuous-capacity throughput-surface sweep …")
+    build_throughput_surface(parallel=True)
+    print("✓ Done building throughput surface.  File: results/throughput_surface.csv")

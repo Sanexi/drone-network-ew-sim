@@ -40,19 +40,23 @@ def build_subbands(f_min_hz: float = 433e6,
 modulations = {
     "BPSK": {
         "bits_per_symbol": 1,
-        "ber_func": lambda eb_n0: 0.5 * erfc(np.sqrt(eb_n0))
+        "ber_func": lambda eb_n0: 0.5 * erfc(np.sqrt(eb_n0)),
+        "code_rate": 0.5
     },
     "QPSK": {
         "bits_per_symbol": 2,
-        "ber_func": lambda eb_n0: 0.5 * erfc(np.sqrt(eb_n0))
+        "ber_func": lambda eb_n0: 0.5 * erfc(np.sqrt(eb_n0)),
+        "code_rate": 0.5
     },
     "16QAM": {
         "bits_per_symbol": 4,
-        "ber_func": lambda eb_n0: 3/8 * erfc(np.sqrt(4/10 * eb_n0))
+        "ber_func": lambda eb_n0: 3/8 * erfc(np.sqrt(4/10 * eb_n0)),
+        "code_rate": 0.5
     },
     "64QAM": {
         "bits_per_symbol": 6,
-        "ber_func": lambda eb_n0: 7/24 * erfc(np.sqrt(1/7 * eb_n0))
+        "ber_func": lambda eb_n0: 7/24 * erfc(np.sqrt(1/7 * eb_n0)),
+        "code_rate": 0.5
     }
 }
 
@@ -224,8 +228,9 @@ class Link2D:
 
         for name, mod in modulations.items():
             bits_per_symbol = mod['bits_per_symbol']
-            R_b = self.bw_hz * bits_per_symbol  # Nyquist rate: B~Rb*bits_per_symbol
-            eb_n0 = snr_lin / bits_per_symbol
+            code_rate = mod['code_rate']
+            R_b = self.bw_hz * bits_per_symbol * code_rate  # Nyquist rate: B~Rb*bits_per_symbol
+            eb_n0 = snr_lin / (bits_per_symbol * code_rate)
             ber = mod['ber_func'](eb_n0)
             per = 1 - (1 - ber)**self.L
             throughput = R_b * (1 - per)
