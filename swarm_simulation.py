@@ -129,6 +129,25 @@ class SwarmSimulation:
         if params_override:
             self.params.update(params_override) # Apply overrides
 
+        # This block ensures that capacity_requirement and link_bw_hz are always consistent.
+        # The data_collector can now EITHER provide a specific 'capacity_requirement'
+        # OR fall back to the high-level 'network_capacity_type'.
+
+        if "capacity_requirement" in self.params and self.params["capacity_requirement"] is not None:
+            # If a specific capacity requirement is given (e.g., from a grid search),
+            # use it to derive the link bandwidth. This overrides any default.
+            cap_req = self.params["capacity_requirement"]
+            self.params["link_bw_hz"] = int(cap_req * 4)
+            # Ensure network_capacity_type is not used to avoid conflicts later
+            if "network_capacity_type" in self.params:
+                del self.params["network_capacity_type"]
+        else:
+            # If no specific capacity requirement is given, derive both values
+            # from the high-level network_capacity_type enum.
+            capacity_type = self.params["network_capacity_type"]
+            self.params["capacity_requirement"] = capacity_type.value["value"]
+            self.params["link_bw_hz"] = CAPACITY_TO_BW_HZ[capacity_type]
+
         self.graph = nx.Graph()
         self.drones = {}; self.leader_id = "M1"; self.current_step = 0; self.log_data = []
         self.sim_intended_directed_flows = []
@@ -149,11 +168,22 @@ class SwarmSimulation:
         # Metrics for data_collector
         self.r1_leader_dist_to_ew_on_first_disconnect = {name: np.nan for name in modulation_types}
         self.r2_leader_dist_to_ew_on_last_disconnect = {name: np.nan for name in modulation_types}
+
+        # Leader distances to EW jammer for first and last sensors/attacks
+        self.rs1_leader_dist_to_ew = {name: np.nan for name in modulation_types} # First Sensor
+        self.rs2_leader_dist_to_ew = {name: np.nan for name in modulation_types} # Last Sensor
+        self.ra1_leader_dist_to_ew = {name: np.nan for name in modulation_types} # First Attack
+        self.ra2_leader_dist_to_ew = {name: np.nan for name in modulation_types} # Last Attack
+
         self.all_drones_passed_ew_x = False
         self.initial_susceptible_physical_links = set()
         self.disconnected_susceptible_physical_links = {name: set() for name in modulation_types}
         self.r1_equiv  = {mod: np.nan for mod in modulation_types}
         self.r2_equiv  = {mod: np.nan for mod in modulation_types}
+
+        # Drone IDs by type
+        self.sensor_drone_ids = [k for k, v in self.drone_ids_map.items() if v == DroneType.SENSOR]
+        self.attack_drone_ids = [k for k, v in self.drone_ids_map.items() if v == DroneType.ATTACK]
 
         self._link_break_normed = { name: {} for name in modulation_types }
 
@@ -392,14 +422,63 @@ class SwarmSimulation:
         # Compute current absolute leader‐to‐jammer distance (metres)
         R_abs = abs(leader_drone.pos[0] - self.params["ew_location"][0])
 
+        # Loop through each modulation type to check connectivity and update drone states
         for mod_name in modulation_types:
-            newly_broken = current_step_disconnected_susceptible_links[mod_name]
+            # Build the active graph for the current modulation type
+            active_graph_for_mod = nx.Graph()
+            active_graph_for_mod.add_nodes_from(self.graph.nodes())
+            active_edges_for_mod = [
+                (u, v) for u, v, data in self.graph.edges(data=True) 
+                if data['is_active'].get(mod_name, True)
+            ]
+            active_graph_for_mod.add_edges_from(active_edges_for_mod)
 
+            # Find all nodes connected to the leader in this modulation's graph
+            connected_nodes_for_mod = set()
+            if self.leader_id in active_graph_for_mod:
+                try:
+                    connected_nodes_for_mod = nx.node_connected_component(active_graph_for_mod, self.leader_id)
+                except (nx.NetworkXError, KeyError):
+                    # Leader is isolated, so only it is "connected" to itself
+                    connected_nodes_for_mod = {self.leader_id}
+
+            # --- NEW: Track Sensor and Attack Drone Disconnection ---
+            disconnected_sensors = set(self.sensor_drone_ids) - connected_nodes_for_mod
+            disconnected_attackers = set(self.attack_drone_ids) - connected_nodes_for_mod
+
+            # RS1: First sensor drone disconnects
+            if np.isnan(self.rs1_leader_dist_to_ew[mod_name]) and len(disconnected_sensors) > 0:
+                self.rs1_leader_dist_to_ew[mod_name] = R_abs
+
+            # RS2: Last sensor drone disconnects
+            if np.isnan(self.rs2_leader_dist_to_ew[mod_name]) and len(disconnected_sensors) == len(self.sensor_drone_ids):
+                self.rs2_leader_dist_to_ew[mod_name] = R_abs
+
+            # RA1: First attack drone disconnects
+            if np.isnan(self.ra1_leader_dist_to_ew[mod_name]) and len(disconnected_attackers) > 0:
+                self.ra1_leader_dist_to_ew[mod_name] = R_abs
+
+            # RA2: Last attack drone disconnects
+            if np.isnan(self.ra2_leader_dist_to_ew[mod_name]) and len(disconnected_attackers) == len(self.attack_drone_ids):
+                self.ra2_leader_dist_to_ew[mod_name] = R_abs
+            
+            # This part is for the link-break metrics (r1, r2)
+            newly_broken = current_step_disconnected_susceptible_links[mod_name]
             for link in newly_broken:
-                # Only record the very first time this (u,v) appears here:
                 if link not in self._link_break_normed[mod_name]:
                     L_uv = self.graph.edges[link]['link_length']
                     self._link_break_normed[mod_name][link] = R_abs / L_uv
+
+        # Update the master connected status based on the "THEORETICAL" modulation for overall sim control
+        # (This determines if drones keep moving)
+        final_connected_nodes = nx.node_connected_component(
+            nx.Graph(
+                [(u, v) for u, v, data in self.graph.edges(data=True) if data['is_active'].get("THEORETICAL", True)]
+            ), self.leader_id
+        ) if self.leader_id in self.graph else {self.leader_id}
+        
+        for drone_id, drone_obj in self.drones.items():
+            drone_obj.is_connected_to_leader = drone_id in final_connected_nodes
 
             
         temp_active_graph = nx.Graph()
@@ -501,9 +580,32 @@ class SwarmSimulation:
             self.r1_equiv[mod_name] = r1_normed[mod_name] * L_ref
             self.r2_equiv[mod_name] = r2_normed[mod_name] * L_ref
 
+        # This ensures that if an event did not happen, its value defaults to the first recorded susceptible link disconnection distance, if available.
+        metrics_to_update = [
+            self.r2_equiv,
+            self.rs1_leader_dist_to_ew,
+            self.rs2_leader_dist_to_ew,
+            self.ra1_leader_dist_to_ew,
+            self.ra2_leader_dist_to_ew
+        ]
+
+        for mod_name in modulation_types:
+            r1_value = self.r1_equiv.get(mod_name)
+            
+            # Only proceed if R1 has a valid number
+            if r1_value is not None and not np.isnan(r1_value):
+                for metric_dict in metrics_to_update:
+                    # If the metric is NaN, update it with the R1 value for this modulation
+                    if np.isnan(metric_dict.get(mod_name, np.nan)):
+                        metric_dict[mod_name] = r1_value
+
         return {
             "r1_leader_dist_to_ew": self.r1_equiv,
             "r2_leader_dist_to_ew": self.r2_equiv,
+            "rs1_leader_dist_to_ew": self.rs1_leader_dist_to_ew,
+            "rs2_leader_dist_to_ew": self.rs2_leader_dist_to_ew,
+            "ra1_leader_dist_to_ew": self.ra1_leader_dist_to_ew,
+            "ra2_leader_dist_to_ew": self.ra2_leader_dist_to_ew,
             "all_drones_passed_ew_x": self.all_drones_passed_ew_x,
             "final_step": self.current_step,
             "num_initial_susceptible_links": len(self.initial_susceptible_physical_links),

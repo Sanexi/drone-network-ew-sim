@@ -85,9 +85,17 @@ def run_single_grid_simulation(args):
         log_row["EW_JAMMER_ACTUAL_BW_AREA"] = simulation_instance.jam_band_idx
         r1_results = results.get('r1_leader_dist_to_ew', {})
         r2_results = results.get('r2_leader_dist_to_ew', {})
+        rs1_results = results.get('rs1_leader_dist_to_ew', {})
+        rs2_results = results.get('rs2_leader_dist_to_ew', {})
+        ra1_results = results.get('ra1_leader_dist_to_ew', {})
+        ra2_results = results.get('ra2_leader_dist_to_ew', {})
         for mod in modulation_types:
             log_row[f"r1_{mod.lower()}_m"] = r1_results.get(mod, np.nan)
             log_row[f"r2_{mod.lower()}_m"] = r2_results.get(mod, np.nan)
+            log_row[f"rs1_{mod.lower()}_m"] = rs1_results.get(mod, np.nan)
+            log_row[f"rs2_{mod.lower()}_m"] = rs2_results.get(mod, np.nan)
+            log_row[f"ra1_{mod.lower()}_m"] = ra1_results.get(mod, np.nan)
+            log_row[f"ra2_{mod.lower()}_m"] = ra2_results.get(mod, np.nan)
         log_row["all_drones_passed_ew_x"] = results.get('all_drones_passed_ew_x', False)
         log_row["final_step"] = results.get('final_step', 0)
         log_row["num_initial_susceptible_links"] = results.get('num_initial_susceptible_links', 0)
@@ -99,6 +107,10 @@ def run_single_grid_simulation(args):
         for mod in modulation_types:
             log_row[f"r1_{mod.lower()}_m"] = "ERROR"
             log_row[f"r2_{mod.lower()}_m"] = "ERROR"
+            log_row[f"rs1_{mod.lower()}_m"] = "ERROR"
+            log_row[f"rs2_{mod.lower()}_m"] = "ERROR"
+            log_row[f"ra1_{mod.lower()}_m"] = "ERROR"
+            log_row[f"ra2_{mod.lower()}_m"] = "ERROR"
         log_row["all_drones_passed_ew_x"] = "ERROR"
         log_row["final_step"] = "ERROR"
         log_row["num_initial_susceptible_links"] = "ERROR"
@@ -106,7 +118,7 @@ def run_single_grid_simulation(args):
     
     return log_row
 
-def run_grid_search(param_grid, grid_log_filename="grid_search_summary.csv", parallel=False):
+def run_grid_search(param_grid={}, grid_log_filename="grid_search_summary.csv", parallel=False):
     """
     Runs multiple simulations based on a grid of parameters, with option for parallel or sequential execution.
     
@@ -140,6 +152,10 @@ def run_grid_search(param_grid, grid_log_filename="grid_search_summary.csv", par
     for mod in modulation_types:
         additional_and_result_fields.append(f"r1_{mod.lower()}_m")
         additional_and_result_fields.append(f"r2_{mod.lower()}_m")
+        additional_and_result_fields.append(f"rs1_{mod.lower()}_m")
+        additional_and_result_fields.append(f"rs2_{mod.lower()}_m")
+        additional_and_result_fields.append(f"ra1_{mod.lower()}_m")
+        additional_and_result_fields.append(f"ra2_{mod.lower()}_m")
     
     for field in additional_and_result_fields:
         if field not in fieldnames_set:
@@ -321,18 +337,19 @@ if __name__ == "__main__":
     # run_single_simulation(params_override=single_run_params, detailed_log_filename_id="cross_row_200m_jam3_p150")
 
     # --- Example: Run a Parallel Grid Search ---
+    capacity_requirements = [100000]#np.linspace(50e3, 5e6, 100).astype(int)
     grid_parameters = {
-        "EW_JAMMER_BW_AREA_SELECTION": [1, 2, 3, 4],
-        "LINK_LENGTH_METERS": list(range(10, 501, 10)),
+        "EW_JAMMER_BW_AREA_SELECTION": [1],#, 2, 3, 4],
+        "LINK_LENGTH_METERS": [100],#list(range(10, 501, 20)),
         "relay_connectivity_config": [
             RelayConnectivityConfig.MINIMAL,
             RelayConnectivityConfig.CROSS_ROW,
             RelayConnectivityConfig.ALL_CONNECT
         ],
-        "network_capacity_type": [NetworkCapacity.SMALL, NetworkCapacity.MEDIUM, NetworkCapacity.LARGE],
+        "capacity_requirement": capacity_requirements#.tolist()
     }
     print("\nRunning grid search in parallel mode:")
-    run_grid_search(param_grid=grid_parameters, grid_log_filename="grid_summary_parallelv3.csv", parallel=True)
+    run_grid_search(grid_parameters, grid_log_filename="grid_summary_parallelv4.csv", parallel=True)
 
     # Example usage for collecting throughput surface:
     # print("\nRunning continuous-capacity throughput-surface sweep …")
