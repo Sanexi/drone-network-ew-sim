@@ -599,6 +599,19 @@ class SwarmSimulation:
                     if np.isnan(metric_dict.get(mod_name, np.nan)):
                         metric_dict[mod_name] = r1_value
 
+        for mod in modulation_types:
+            # Check and flip Sensor metrics if needed
+            rs1_val = self.rs1_leader_dist_to_ew.get(mod, np.nan)
+            rs2_val = self.rs2_leader_dist_to_ew.get(mod, np.nan)
+            if not np.isnan(rs1_val) and not np.isnan(rs2_val) and rs1_val < rs2_val:
+                self.rs1_leader_dist_to_ew[mod], self.rs2_leader_dist_to_ew[mod] = rs2_val, rs1_val
+
+            # Check and flip Attack metrics if needed
+            ra1_val = self.ra1_leader_dist_to_ew.get(mod, np.nan)
+            ra2_val = self.ra2_leader_dist_to_ew.get(mod, np.nan)
+            if not np.isnan(ra1_val) and not np.isnan(ra2_val) and ra1_val < ra2_val:
+                self.ra1_leader_dist_to_ew[mod], self.ra2_leader_dist_to_ew[mod] = ra2_val, ra1_val
+
         return {
             "r1_leader_dist_to_ew": self.r1_equiv,
             "r2_leader_dist_to_ew": self.r2_equiv,
