@@ -165,15 +165,15 @@ class SwarmSimulation:
             self.jam_band_idx = random.randint(1, 4)
         else: self.jam_band_idx = int(self.params["EW_JAMMER_BW_AREA_SELECTION"])
         
-        # Metrics for data_collector
-        self.r1_leader_dist_to_ew_on_first_disconnect = {name: np.nan for name in modulation_types}
-        self.r2_leader_dist_to_ew_on_last_disconnect = {name: np.nan for name in modulation_types}
-
-        # Leader distances to EW jammer for first and last sensors/attacks
-        self.rs1_leader_dist_to_ew = {name: np.nan for name in modulation_types} # First Sensor
-        self.rs2_leader_dist_to_ew = {name: np.nan for name in modulation_types} # Last Sensor
-        self.ra1_leader_dist_to_ew = {name: np.nan for name in modulation_types} # First Attack
-        self.ra2_leader_dist_to_ew = {name: np.nan for name in modulation_types} # Last Attack
+        # Final metrics to be returned
+        self.rs1_leader_dist_to_ew = {name: np.nan for name in modulation_types}
+        self.rs2_leader_dist_to_ew = {name: np.nan for name in modulation_types}
+        self.ra1_leader_dist_to_ew = {name: np.nan for name in modulation_types}
+        self.ra2_leader_dist_to_ew = {name: np.nan for name in modulation_types}
+        
+        # Intermediate dictionaries to log disconnection events for each drone individually
+        self._sensor_disconnect_distances = {mod: {} for mod in modulation_types}
+        self._attack_disconnect_distances = {mod: {} for mod in modulation_types}
 
         self.all_drones_passed_ew_x = False
         self.initial_susceptible_physical_links = set()
@@ -195,8 +195,6 @@ class SwarmSimulation:
     def _setup_swarm_formation_and_graph(self):
         leader_start_pos = list(self.params["start_point"]); link_length = self.params["LINK_LENGTH_METERS"]
 
-        # If the top-level params_override provided an explicit capacity_requirement,
-        # use it (optionally still scaled by the safety factor); otherwise fall back.
         if "capacity_requirement" in self.params:
             base_cap_val = self.params["capacity_requirement"]
         else:
@@ -212,29 +210,23 @@ class SwarmSimulation:
             self.drones[drone_id_str] = drone
             self.graph.add_node(drone_id_str, drone=drone)
 
-        # Add fixed connections (M-R, R-S/A)
         for u, v in self.base_physical_links:
             self.graph.add_edge(u,v)
 
-        # Add inter-relay connections based on the connectivity config
-        config = self.params["relay_connectivity_config"] # This is the enum member
+        config = self.params["relay_connectivity_config"] 
         r1, r2, r3, r4 = self.relay_ids_ordered
         if config == RelayConnectivityConfig.CROSS_ROW or config == RelayConnectivityConfig.ALL_CONNECT:
             self.graph.add_edge(r1, r3)
             self.graph.add_edge(r2, r4)
         if config == RelayConnectivityConfig.ALL_CONNECT:
-            self.graph.add_edge(r1, r2) # R1-R2 (Front row)
-            self.graph.add_edge(r3, r4) # R3-R4 (Back row)
+            self.graph.add_edge(r1, r2) 
+            self.graph.add_edge(r3, r4)
 
-        # Initialize edge attributes: bw_area, required_safety_capacity, base_capacity
-        for u, v in self.graph.edges(): # Iterates over unique physical links
+        for u, v in self.graph.edges():
             edge_bw_area = get_edge_property_value(u,v,current_scenario_props, "bw_area")
             edge_safety_factor = get_edge_property_value(u,v,current_scenario_props, "safety_factor")
-            # Compute the geometric length of link (u,v) in metres.
-            # We know each drone’s initial_relative_pos_to_leader (in metres), so:
             pos_u = np.array(self.drones[u].initial_relative_pos_to_leader)
             pos_v = np.array(self.drones[v].initial_relative_pos_to_leader)
-            # Euclidean distance (metres) between u and v:
             L_uv = float(np.linalg.norm(pos_u - pos_v))
 
             self.graph.edges[u, v].update({
@@ -244,7 +236,7 @@ class SwarmSimulation:
                 'current_capacities': {name: base_cap_val for name in modulation_types},
                 'is_active': {name: True for name in modulation_types},
                 'is_ew_susceptible': False,
-                'link_length': L_uv   # <— store the link length in metres
+                'link_length': L_uv
             })
 
     def _log_initial_parameters(self):
@@ -254,30 +246,26 @@ class SwarmSimulation:
         self.log_data.append(param_log)
 
     def _init_rf_world_and_swarm(self):
-        # find the bounding box of *all* drones in *relative* metres
         rel_xy = np.array(
-            [self.drones[d_id].initial_relative_pos_to_leader            # metres
+            [self.drones[d_id].initial_relative_pos_to_leader
             for d_id in self.drones]
         )
         x_min_rel, y_min_rel = rel_xy.min(axis=0)
         x_max_rel, y_max_rel = rel_xy.max(axis=0)
 
-        swarm_width  = x_max_rel - x_min_rel       # in metres
+        swarm_width  = x_max_rel - x_min_rel
         swarm_height = y_max_rel - y_min_rel
 
-        # leader moves from start-point → end-point (both in params)
         sx, sy = self.params["start_point"]
         ex, ey = self.params["end_point"]
 
-        # build the RF world 
         NX = int(ex - sx + 2*swarm_width)
         NY = int(ey - sy + 2*swarm_height)                    
         self.rf_world = rf.World2D((sx - swarm_height, ex + swarm_height), (sy - swarm_width, ey + swarm_width), nx=NX, ny=NY)
 
-        centres, sub_bw_hz = rf.build_subbands()   # all Hz now
+        centres, sub_bw_hz = rf.build_subbands()
         band_idx   = self.jam_band_idx - 1     
 
-        # convert jammer world-coords → nearest grid index
         jx, jy  = self.params["ew_location"]
         ix = int(np.argmin(np.abs(self.rf_world.xs - jx)))
         iy = int(np.argmin(np.abs(self.rf_world.ys - jy)))
@@ -290,7 +278,6 @@ class SwarmSimulation:
         
         self.rf_net = rf.Network2D([jammer])
 
-        # ---------- build rf drones with SAME relative pattern -----------
         rf_drones: list[rf.Drone2D] = []
         rf_drone_map: dict[str, rf.Drone2D] = {}
         for d_id, sim_drone in self.drones.items():
@@ -299,37 +286,29 @@ class SwarmSimulation:
             rf_drones.append(rf_d); rf_drone_map[d_id] = rf_d
         rf_master = rf_drone_map[self.leader_id]
 
-
-        # ---------- RF links for every swarm edge -------------------------
-        # Define intended DIRECTED communication flows for rf.Link2D instantiation
         intended_directed_flows = []
-        # Sensors -> Relays
         intended_directed_flows.extend([("S1", "R1"), ("S2", "R1"), ("S3", "R2"), ("S4", "R2")])
-        # Relays -> Master -> Relays
         intended_directed_flows.extend([("R1", "M1"), ("R2", "M1"), ("M1", "R3"), ("M1", "R4")])
-        # Relays -> Attack
         intended_directed_flows.extend([("R3", "A1"), ("R3", "A2"), ("R4", "A3"), ("R4", "A4")])
 
-        # Inter-Relay directed flows
         config = self.params["relay_connectivity_config"]
         r1, r2, r3, r4 = self.relay_ids_ordered
         if config == RelayConnectivityConfig.CROSS_ROW or config == RelayConnectivityConfig.ALL_CONNECT:
-            intended_directed_flows.append((r1, r3)) # Front-Left to Back-Left
-            intended_directed_flows.append((r2, r4)) # Front-Right to Back-Right
+            intended_directed_flows.append((r1, r3))
+            intended_directed_flows.append((r2, r4))
         if config == RelayConnectivityConfig.ALL_CONNECT:
-            intended_directed_flows.append((r1, r2)) # Intra-row Front: Left to Right
-            intended_directed_flows.append((r3, r4)) # Intra-row Back: Left to Right
+            intended_directed_flows.append((r1, r2))
+            intended_directed_flows.append((r3, r4))
 
-        # Create rf.Link2D objects based on these directed flows
         self.sim_intended_directed_flows = []
         all_rf_link_objects = []
         current_scenario_props = EDGE_PROPERTIES_BY_SCENARIO[self.params["relay_connectivity_config"]]
-        centres, sub_bw_hz = rf.build_subbands() # Assuming this is available
-        if "link_bw_hz" in self.params: # If link bandwidth is separately defined
+        centres, sub_bw_hz = rf.build_subbands()
+        if "link_bw_hz" in self.params:
             link_bw_hz = self.params["link_bw_hz"]
         else:
             link_bw_hz = CAPACITY_TO_BW_HZ[self.params["network_capacity_type"]]
-        LINK_POWER_W = 0.1 # 100 mW per intra-swarm radio (example)
+        LINK_POWER_W = 0.1
         band_idx_jammer = self.jam_band_idx - 1
 
 
@@ -338,7 +317,6 @@ class SwarmSimulation:
                 print(f"Warning: Drone ID {tx_id} or {rx_id} not in rf_drone_map. Skipping Link2D.")
                 continue
 
-            # Properties are for the physical link
             edge_bw_area = get_edge_property_value(tx_id, rx_id, current_scenario_props, "bw_area")
             band_idx_edge = edge_bw_area - 1
             capacity_requirement = self.graph.edges[tx_id, rx_id]['required_safety_capacity']
@@ -353,14 +331,13 @@ class SwarmSimulation:
                 capacity_requirement=capacity_requirement,
             )
             all_rf_link_objects.append(lk)
-            self.sim_intended_directed_flows.append((tx_id, rx_id)) # Add to list for logging
+            self.sim_intended_directed_flows.append((tx_id, rx_id))
 
-            # Add to initial_susceptible_physical_links if susceptible
             if lk.is_susceptible:
                 self.initial_susceptible_physical_links.add(tuple(sorted((tx_id, rx_id))))
 
         self.rf_swarm = rf.Swarm2D(rf_master, rf_drones,
-                                    all_rf_link_objects, # Pass the list of directed Link2D objects
+                                    all_rf_link_objects,
                                     scale=self.params["LINK_LENGTH_METERS"])
 
     def _calculate_distance(self, pos1, pos2):
@@ -370,10 +347,9 @@ class SwarmSimulation:
         self.current_step += 1
         leader_drone = self.drones[self.leader_id]
         current_pos, target_pos = leader_drone.pos, self.params["end_point"]
-        # Leader continues towards end_point, but simulation might end due to other conditions
         dist_to_tar = self._calculate_distance(current_pos, target_pos); dx, dy = 0.0, 0.0
-        if dist_to_tar > 1e-6 : # Only move if not yet at the final end_point
-            step_dist = min(self.params["step_size_m"], dist_to_tar) # Don't overshoot
+        if dist_to_tar > 1e-6 :
+            step_dist = min(self.params["step_size_m"], dist_to_tar)
             dir_x,dir_y = (target_pos[0]-current_pos[0])/dist_to_tar, (target_pos[1]-current_pos[1])/dist_to_tar
             dx,dy = dir_x*step_dist, dir_y*step_dist
         leader_drone.move(dx,dy)
@@ -397,14 +373,13 @@ class SwarmSimulation:
                 edge_data_undirected.update({
                     'is_ew_susceptible': ew_result['is_susceptible'],
                     'current_capacities': ew_result['throughput_dict'],
-                    'is_active': ew_result['is_active'],  # dict[str, bool]
+                    'is_active': ew_result['is_active'],
                 })
 
                 if ew_result['is_susceptible']:
                     for mod_name in modulation_types:
                         if not ew_result['is_active'].get(mod_name, True):
                             if physical_link_key not in self.disconnected_susceptible_physical_links[mod_name]:
-                                # record it as “newly broken this step”:
                                 current_step_disconnected_susceptible_links[mod_name].add(physical_link_key)
                             self.disconnected_susceptible_physical_links[mod_name].add(physical_link_key)
 
@@ -415,16 +390,12 @@ class SwarmSimulation:
                     'is_active': {name: True for name in modulation_types},
                 })
 
-            # Consider a link active for inclusion if *any* modulation is active (or define your own rule)
             if edge_data_undirected['is_active'].get("THEORETICAL"):
                 active_graph_edges_undirected.append((u, v))
 
-        # Compute current absolute leader‐to‐jammer distance (metres)
         R_abs = abs(leader_drone.pos[0] - self.params["ew_location"][0])
 
-        # Loop through each modulation type to check connectivity and update drone states
         for mod_name in modulation_types:
-            # Build the active graph for the current modulation type
             active_graph_for_mod = nx.Graph()
             active_graph_for_mod.add_nodes_from(self.graph.nodes())
             active_edges_for_mod = [
@@ -433,44 +404,29 @@ class SwarmSimulation:
             ]
             active_graph_for_mod.add_edges_from(active_edges_for_mod)
 
-            # Find all nodes connected to the leader in this modulation's graph
             connected_nodes_for_mod = set()
             if self.leader_id in active_graph_for_mod:
                 try:
                     connected_nodes_for_mod = nx.node_connected_component(active_graph_for_mod, self.leader_id)
                 except (nx.NetworkXError, KeyError):
-                    # Leader is isolated, so only it is "connected" to itself
                     connected_nodes_for_mod = {self.leader_id}
 
-            # --- NEW: Track Sensor and Attack Drone Disconnection ---
-            disconnected_sensors = set(self.sensor_drone_ids) - connected_nodes_for_mod
-            disconnected_attackers = set(self.attack_drone_ids) - connected_nodes_for_mod
-
-            # RS1: First sensor drone disconnects
-            if np.isnan(self.rs1_leader_dist_to_ew[mod_name]) and len(disconnected_sensors) > 0:
-                self.rs1_leader_dist_to_ew[mod_name] = R_abs
-
-            # RS2: Last sensor drone disconnects
-            if np.isnan(self.rs2_leader_dist_to_ew[mod_name]) and len(disconnected_sensors) == len(self.sensor_drone_ids):
-                self.rs2_leader_dist_to_ew[mod_name] = R_abs
-
-            # RA1: First attack drone disconnects
-            if np.isnan(self.ra1_leader_dist_to_ew[mod_name]) and len(disconnected_attackers) > 0:
-                self.ra1_leader_dist_to_ew[mod_name] = R_abs
-
-            # RA2: Last attack drone disconnects
-            if np.isnan(self.ra2_leader_dist_to_ew[mod_name]) and len(disconnected_attackers) == len(self.attack_drone_ids):
-                self.ra2_leader_dist_to_ew[mod_name] = R_abs
+            current_disconnected_sensors = set(self.sensor_drone_ids) - connected_nodes_for_mod
+            for sensor_id in current_disconnected_sensors:
+                if sensor_id not in self._sensor_disconnect_distances[mod_name]:
+                    self._sensor_disconnect_distances[mod_name][sensor_id] = R_abs
             
-            # This part is for the link-break metrics (r1, r2)
+            current_disconnected_attackers = set(self.attack_drone_ids) - connected_nodes_for_mod
+            for attacker_id in current_disconnected_attackers:
+                if attacker_id not in self._attack_disconnect_distances[mod_name]:
+                    self._attack_disconnect_distances[mod_name][attacker_id] = R_abs
+            
             newly_broken = current_step_disconnected_susceptible_links[mod_name]
             for link in newly_broken:
                 if link not in self._link_break_normed[mod_name]:
                     L_uv = self.graph.edges[link]['link_length']
                     self._link_break_normed[mod_name][link] = R_abs / L_uv
 
-        # Update the master connected status based on the "THEORETICAL" modulation for overall sim control
-        # (This determines if drones keep moving)
         final_connected_nodes = nx.node_connected_component(
             nx.Graph(
                 [(u, v) for u, v, data in self.graph.edges(data=True) if data['is_active'].get("THEORETICAL", True)]
@@ -480,25 +436,10 @@ class SwarmSimulation:
         for drone_id, drone_obj in self.drones.items():
             drone_obj.is_connected_to_leader = drone_id in final_connected_nodes
 
-            
-        temp_active_graph = nx.Graph()
-        temp_active_graph.add_nodes_from(self.graph.nodes())
-        temp_active_graph.add_edges_from(active_graph_edges_undirected)
-        for drone_obj in self.drones.values(): drone_obj.is_connected_to_leader = False
-        if self.leader_id in temp_active_graph:
-            try:
-                connected_nodes = nx.node_connected_component(temp_active_graph, self.leader_id)
-                for node_id in connected_nodes:
-                    if node_id in self.drones: self.drones[node_id].is_connected_to_leader = True
-            except (nx.NetworkXError, KeyError):
-                 if self.leader_id in self.drones: self.drones[self.leader_id].is_connected_to_leader = True
-
         if self.params["logging_enabled"]: self._log_step_data()
         
-        # Check simulation end conditions
         num_conn = sum(1 for d in self.drones.values() if d.is_connected_to_leader)
         
-        # New end condition: all drones passed EW jammer's X-coordinate by a margin
         ew_x = self.params["ew_location"][0]
         rearmost_drone_x = min(d.pos[0] for d in self.drones.values()) if self.drones else leader_drone.pos[0]
         
@@ -507,25 +448,15 @@ class SwarmSimulation:
             print(f"End: All drones passed EW jammer X-coordinate at step {self.current_step}.")
             return True
             
-        # Original end conditions (can still trigger if they happen before all pass EW)
         if num_conn == 0 and len(self.drones)>0: print(f"End: All disconnected step {self.current_step}."); return True
         if num_conn == 1 and self.drones[self.leader_id].is_connected_to_leader and len(self.drones)>1:
             print(f"End: Only M1 connected step {self.current_step}."); return True
         
-        # Safety break if simulation runs too long for some reason (e.g. drones stuck before EW)
-        # This is a fallback, ideally the FLIGHT_MARGIN_PAST_EW_M condition is met.
-        # Max steps relative to the expected travel distance.
         max_expected_steps = (self._calculate_distance(self.params["start_point"], self.params["end_point"]) + self.params["FLIGHT_MARGIN_PAST_EW_M"] + 200) / self.params["step_size_m"]
-        if self.current_step > max_expected_steps * 1.5: # Allow some leeway
+        if self.current_step > max_expected_steps * 1.5:
             print(f"End: Exceeded safety max steps ({self.current_step} > {max_expected_steps * 1.5:.0f}).")
             return True
         
-        # Debug drone positions
-        # if self.current_step % 100 == 0:
-        #     print(f"\n[Step {self.current_step}] Drone positions:")
-        #     for d_id, d in self.drones.items():
-        #         print(f"  {d_id:>2}: x={d.pos[0]:.2f}, y={d.pos[1]:.2f}")
-
         return False
 
     def _log_step_data(self):
@@ -550,11 +481,8 @@ class SwarmSimulation:
 
     def run_simulation(self):
         print(f"Starting simulation for config: LINK_LENGTH_METERS={self.params['LINK_LENGTH_METERS']}, JAMMER_BW_AREA={self.jam_band_idx}, CONNECTIVITY={self.params['relay_connectivity_config'].name}")
-        # print(f"Leader: {self.leader_id}, Target: {self.params['end_point']}")
-        # print(f"Total Drones: {len(self.drones)}, EW Location: {self.params['ew_location']}")
-        if not self.graph.number_of_edges()>0: print("No edges in graph after setup.")
         
-        while True: # Loop until an end condition is met in step()
+        while True:
             if self.step():
                 break
         
@@ -565,53 +493,44 @@ class SwarmSimulation:
         r1_normed = {mod: np.nan for mod in modulation_types}
         r2_normed = {mod: np.nan for mod in modulation_types}
         for mod_name in modulation_types:
-            # Skip if no link ever failed under this modulation
             if not self._link_break_normed[mod_name]:
                 continue
 
-            # Grab only the normalized‐fractions recorded for this modulation
             all_normed_values = list(self._link_break_normed[mod_name].values())
             r2_normed[mod_name] = min(all_normed_values)
             r1_normed[mod_name] = max(all_normed_values)
 
-        # Now convert back to equivalent metres on the standard link length:
         L_ref = self.params["LINK_LENGTH_METERS"]
         for mod_name in modulation_types:
             self.r1_equiv[mod_name] = r1_normed[mod_name] * L_ref
             self.r2_equiv[mod_name] = r2_normed[mod_name] * L_ref
 
-        # This ensures that if an event did not happen, its value defaults to the first recorded susceptible link disconnection distance, if available.
-        metrics_to_update = [
-            self.r2_equiv,
-            self.rs1_leader_dist_to_ew,
-            self.rs2_leader_dist_to_ew,
-            self.ra1_leader_dist_to_ew,
-            self.ra2_leader_dist_to_ew
-        ]
-
+        # --- FIX START: Correctly calculate final RS/RA metrics ---
+        # This logic robustly defines RS1/RA1 as the first failure event (max distance)
+        # and RS2/RA2 as the last failure event among those that failed (min distance).
         for mod_name in modulation_types:
-            r1_value = self.r1_equiv.get(mod_name)
+            # --- Sensor Metrics (RS1, RS2) ---
+            sensor_distances = list(self._sensor_disconnect_distances[mod_name].values())
+            if sensor_distances:
+                # RS1: First sensor to disconnect. This happens at the largest distance from the jammer.
+                self.rs1_leader_dist_to_ew[mod_name] = max(sensor_distances)
+                
+                # RS2: Last of the disconnected sensors to disconnect. This happens at the smallest distance.
+                # This value is meaningful even if not all sensors disconnect. It represents the point
+                # at which the last failure event occurred for the sensor sub-swarm.
+                self.rs2_leader_dist_to_ew[mod_name] = min(sensor_distances)
+            # If sensor_distances is empty, both RS1 and RS2 remain NaN, indicating no sensor ever failed.
             
-            # Only proceed if R1 has a valid number
-            if r1_value is not None and not np.isnan(r1_value):
-                for metric_dict in metrics_to_update:
-                    # If the metric is NaN, update it with the R1 value for this modulation
-                    if np.isnan(metric_dict.get(mod_name, np.nan)):
-                        metric_dict[mod_name] = r1_value
-
-        for mod in modulation_types:
-            # Check and flip Sensor metrics if needed
-            rs1_val = self.rs1_leader_dist_to_ew.get(mod, np.nan)
-            rs2_val = self.rs2_leader_dist_to_ew.get(mod, np.nan)
-            if not np.isnan(rs1_val) and not np.isnan(rs2_val) and rs1_val < rs2_val:
-                self.rs1_leader_dist_to_ew[mod], self.rs2_leader_dist_to_ew[mod] = rs2_val, rs1_val
-
-            # Check and flip Attack metrics if needed
-            ra1_val = self.ra1_leader_dist_to_ew.get(mod, np.nan)
-            ra2_val = self.ra2_leader_dist_to_ew.get(mod, np.nan)
-            if not np.isnan(ra1_val) and not np.isnan(ra2_val) and ra1_val < ra2_val:
-                self.ra1_leader_dist_to_ew[mod], self.ra2_leader_dist_to_ew[mod] = ra2_val, ra1_val
-
+            # --- Attack Metrics (RA1, RA2) ---
+            attack_distances = list(self._attack_disconnect_distances[mod_name].values())
+            if attack_distances:
+                # RA1: First attack drone to disconnect is at the MAX distance.
+                self.ra1_leader_dist_to_ew[mod_name] = max(attack_distances)
+                # RA2: Last of the disconnected attack drones to disconnect is at the MIN distance.
+                self.ra2_leader_dist_to_ew[mod_name] = min(attack_distances)
+            # If attack_distances is empty, both RA1 and RA2 remain NaN.
+        # --- FIX END ---
+        
         return {
             "r1_leader_dist_to_ew": self.r1_equiv,
             "r2_leader_dist_to_ew": self.r2_equiv,
@@ -622,25 +541,21 @@ class SwarmSimulation:
             "all_drones_passed_ew_x": self.all_drones_passed_ew_x,
             "final_step": self.current_step,
             "num_initial_susceptible_links": len(self.initial_susceptible_physical_links),
-            "num_disconnected_susceptible_links": len(self.disconnected_susceptible_physical_links["THEORETICAL"]) # Note: This measure is outdated since we now have multiple modulations
+            "num_disconnected_susceptible_links": len(self.disconnected_susceptible_physical_links["THEORETICAL"])
         }
 
 
     def write_log_to_csv(self):
         if not self.log_data: print("No log data to write."); return
         
-        # Generate a unique part for the filename if not explicitly set for grid search
         if self.params.get("run_id_for_filename"):
             filename = f"{self.params['csv_filename_prefix']}{self.params['run_id_for_filename']}.csv"
-        else: # Default for single runs
-            timestamp = random.randint(1000,9999) # Simple unique part
+        else:
+            timestamp = random.randint(1000,9999)
             filename = f"{self.params['csv_filename_prefix']}{self.params['relay_connectivity_config'].name}_len{int(self.params['LINK_LENGTH_METERS'])}_jam{self.jam_band_idx}_{timestamp}.csv"
         
         print(f"Writing detailed log to {filename}...")
         param_data = next((item["data"] for item in self.log_data if item["type"] == "parameters"),{})
-        # Add R1 and R2 to parameters if they were recorded
-        # param_data["R1_Distance"] = self.r1_leader_dist_to_ew_on_first_disconnect
-        # param_data["R2_Distance"] = self.r2_leader_dist_to_ew_on_last_disconnect
         param_data["All_Drones_Passed_EW_X"] = self.all_drones_passed_ew_x
 
         edge_fieldnames = ['step','leader_pos_x','leader_pos_y','connected_drones_count',
@@ -657,7 +572,6 @@ class SwarmSimulation:
                     lp_x = log_entry["leader_pos"][0] if len(log_entry["leader_pos"]) > 0 else 'N/A'
                     lp_y = log_entry["leader_pos"][1] if len(log_entry["leader_pos"]) > 1 else 'N/A'
                     for edge_info in log_entry["edges"]:
-                        # Base values
                         row = [
                             log_entry["step"],
                             lp_x,
@@ -670,10 +584,9 @@ class SwarmSimulation:
                             edge_info['is_ew_susceptible']
                         ]
 
-                        # Modulation-specific capacities
                         capacities = edge_info.get("current_capacities", {})
                         row.extend([
-                            capacities.get(mod, 0.0)  # default to 0.0 if missing
+                            capacities.get(mod, 0.0)
                             for mod in modulation_types
                         ])
 
@@ -682,8 +595,7 @@ class SwarmSimulation:
 
 # --- Main Execution (for testing this file directly) ---
 if __name__ == "__main__":
-    print("Running a single test simulation from swarm_simulation_v7.py...")
-    # Example of overriding some parameters for a direct test run
+    print("Running a single test simulation from swarm_simulation.py...")
     test_params = {
         "LINK_LENGTH_METERS": 300.0,
         "relay_connectivity_config": RelayConnectivityConfig.CROSS_ROW,
@@ -700,4 +612,3 @@ if __name__ == "__main__":
     print(f"Simulation ended at step: {results['final_step']}")
     print(f"Initial susceptible links: {results['num_initial_susceptible_links']}")
     print(f"Disconnected susceptible links: {results['num_disconnected_susceptible_links']}")
-    simulation.rf_swarm.plot_snapshot()

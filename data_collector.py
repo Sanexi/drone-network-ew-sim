@@ -349,7 +349,7 @@ if __name__ == "__main__":
         "capacity_requirement": capacity_requirements.tolist()
     }
     print("\nRunning grid search in parallel mode:")
-    run_grid_search(grid_parameters, grid_log_filename="grid_summary_parallelv6.csv", parallel=True)
+    run_grid_search(grid_parameters, grid_log_filename="grid_summary_parallelv7.csv", parallel=True)
 
     # Example usage for collecting throughput surface:
     # print("\nRunning continuous-capacity throughput-surface sweep …")
