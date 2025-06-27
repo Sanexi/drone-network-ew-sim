@@ -425,7 +425,7 @@ class SwarmSimulation:
             for link in newly_broken:
                 if link not in self._link_break_normed[mod_name]:
                     L_uv = self.graph.edges[link]['link_length']
-                    self._link_break_normed[mod_name][link] = R_abs / L_uv
+                    self._link_break_normed[mod_name][link] = R_abs #/ L_uv no normalization needed
 
         final_connected_nodes = nx.node_connected_component(
             nx.Graph(
@@ -502,12 +502,10 @@ class SwarmSimulation:
 
         L_ref = self.params["LINK_LENGTH_METERS"]
         for mod_name in modulation_types:
-            self.r1_equiv[mod_name] = r1_normed[mod_name] * L_ref
-            self.r2_equiv[mod_name] = r2_normed[mod_name] * L_ref
+            self.r1_equiv[mod_name] = r1_normed[mod_name] #* L_ref no normalization needed
+            self.r2_equiv[mod_name] = r2_normed[mod_name] #* L_ref
 
-        # --- FIX START: Correctly calculate final RS/RA metrics ---
-        # This logic robustly defines RS1/RA1 as the first failure event (max distance)
-        # and RS2/RA2 as the last failure event among those that failed (min distance).
+        # This logic robustly defines RS1/RA1 as the first failure event (max distance) and RS2/RA2 as the last failure event among those that failed (min distance).
         for mod_name in modulation_types:
             # --- Sensor Metrics (RS1, RS2) ---
             sensor_distances = list(self._sensor_disconnect_distances[mod_name].values())
@@ -529,7 +527,6 @@ class SwarmSimulation:
                 # RA2: Last of the disconnected attack drones to disconnect is at the MIN distance.
                 self.ra2_leader_dist_to_ew[mod_name] = min(attack_distances)
             # If attack_distances is empty, both RA1 and RA2 remain NaN.
-        # --- FIX END ---
         
         return {
             "r1_leader_dist_to_ew": self.r1_equiv,

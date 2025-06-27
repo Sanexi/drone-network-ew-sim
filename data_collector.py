@@ -337,7 +337,7 @@ if __name__ == "__main__":
     # run_single_simulation(params_override=single_run_params, detailed_log_filename_id="cross_row_200m_jam3_p150")
 
     # --- Example: Run a Parallel Grid Search ---
-    capacity_requirements = np.linspace(50e3, 5e6, 40).astype(int)
+    capacity_requirements = np.linspace(50e3, 5e6, 60).astype(int)
     grid_parameters = {
         "EW_JAMMER_BW_AREA_SELECTION": [1, 2, 3, 4],
         "LINK_LENGTH_METERS": [100],
@@ -349,7 +349,7 @@ if __name__ == "__main__":
         "capacity_requirement": capacity_requirements.tolist()
     }
     print("\nRunning grid search in parallel mode:")
-    run_grid_search(grid_parameters, grid_log_filename="grid_summary_parallelv7.csv", parallel=True)
+    run_grid_search(grid_parameters, grid_log_filename="grid_summary_parallelv8.csv", parallel=True)
 
     # Example usage for collecting throughput surface:
     # print("\nRunning continuous-capacity throughput-surface sweep …")
